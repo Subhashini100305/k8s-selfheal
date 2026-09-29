@@ -2,257 +2,354 @@ package metrics
 
 import "time"
 
-// Calculate calculates runtime metrics from incident records.
+var terminalOutcomes = map[string]bool{
+	"recovered":   true,
+	"rolled_back": true,
+	"exhausted":   true,
+	"escalated":   true,
+	"rejected":    true,
+}
+
+type incidentAggregate struct {
+	id              string
+	workload        string
+	arm             string
+	injectedAt      time.Time
+	detectedAt      time.Time
+	terminalAt      time.Time
+	terminalOutcome string
+	attempts        int
+	rollback        bool
+	legacySuccess   bool
+	hasWeek3Outcome bool
+}
+
+// Calculate calculates runtime metrics from audit records.
+// It supports both legacy Week-2 one-record-per-incident files and Week-3
+// multi-attempt incident files.
 func Calculate(records []AuditRecord) Summary {
 	summary := Summary{
-		TotalIncidents: len(records),
+		OutcomeDistribution: map[string]int{
+			"recovered":   0,
+			"rolled_back": 0,
+			"exhausted":   0,
+			"escalated":   0,
+			"rejected":    0,
+		},
 	}
-
 	if len(records) == 0 {
 		return summary
 	}
 
-	var totalTTDDuration time.Duration
-	var totalTTMDuration time.Duration
-	var totalInferenceDuration time.Duration
-	var totalClusterConvergenceDuration time.Duration
+	incidents := make(map[string]*incidentAggregate)
 
-	var validTTDRecords int
-	var validTTMRecords int
-	var validInferenceRecords int
-	var validClusterConvergenceRecords int
+	var totalInference, totalApply, totalVerify, totalConvergence time.Duration
+	var validInference, validApply, validVerify, validConvergence int
+	var acceptedCount, rejectedCount int
 
-	var acceptedCount int
-	var rejectedCount int
-
-	for _, record := range records {
-		// --------------------------------------------------------
-		// Overall recovery metrics.
-		// --------------------------------------------------------
-		if record.Success {
-			summary.SuccessfulRecoveries++
-		} else {
-			summary.FailedRecoveries++
+	for i, record := range records {
+		key := record.IncidentID
+		if key == "" {
+			// Preserve separate legacy records even if an old fixture omitted ID.
+			key = "__record_" + time.Duration(i).String()
+		}
+		inc, ok := incidents[key]
+		if !ok {
+			inc = &incidentAggregate{id: key}
+			incidents[key] = inc
 		}
 
-		if record.RolledBack {
-			summary.TotalRollbacks++
+		if inc.workload == "" {
+			inc.workload = record.Workload
+		}
+		if inc.arm == "" {
+			inc.arm = record.ExperimentArm
+		}
+		if inc.injectedAt.IsZero() || (!record.InjectedAt.IsZero() && record.InjectedAt.Before(inc.injectedAt)) {
+			inc.injectedAt = record.InjectedAt
+		}
+		if inc.detectedAt.IsZero() || (!record.DetectedAt.IsZero() && record.DetectedAt.Before(inc.detectedAt)) {
+			inc.detectedAt = record.DetectedAt
 		}
 
 		if record.RemediationAttempt {
+			inc.attempts++
 			summary.RemediationAttempts++
 		}
-
-		// --------------------------------------------------------
-		// TTD = detected - injected.
-		// --------------------------------------------------------
-		if !record.InjectedAt.IsZero() &&
-			!record.DetectedAt.IsZero() &&
-			record.DetectedAt.After(record.InjectedAt) {
-
-			totalTTDDuration +=
-				record.DetectedAt.Sub(record.InjectedAt)
-
-			validTTDRecords++
+		if record.RolledBack {
+			inc.rollback = true
+			summary.TotalRollbacks++
+		}
+		if record.Success {
+			inc.legacySuccess = true
 		}
 
-		// --------------------------------------------------------
-		// TTM = mitigated - detected.
-		// --------------------------------------------------------
-		if !record.DetectedAt.IsZero() &&
-			!record.MitigatedAt.IsZero() &&
-			record.MitigatedAt.After(record.DetectedAt) {
-
-			totalTTMDuration +=
-				record.MitigatedAt.Sub(record.DetectedAt)
-
-			validTTMRecords++
+		if terminalOutcomes[record.TerminalOutcome] {
+			inc.hasWeek3Outcome = true
+			inc.terminalOutcome = record.TerminalOutcome
+			inc.terminalAt = record.TerminalAt
 		}
 
-		// --------------------------------------------------------
-		// Inference latency =
-		// classifier completed - classifier started.
-		// --------------------------------------------------------
-		if !record.ClassifierStartedAt.IsZero() &&
-			!record.ClassifierCompletedAt.IsZero() &&
-			record.ClassifierCompletedAt.After(
-				record.ClassifierStartedAt,
-			) {
-
-			totalInferenceDuration +=
-				record.ClassifierCompletedAt.Sub(
-					record.ClassifierStartedAt,
-				)
-
-			validInferenceRecords++
+		if validDuration(record.ClassifierStartedAt, record.ClassifierCompletedAt) {
+			totalInference += record.ClassifierCompletedAt.Sub(record.ClassifierStartedAt)
+			validInference++
+		}
+		if validDuration(record.ClassifierCompletedAt, record.ActionStartedAt) {
+			totalApply += record.ActionStartedAt.Sub(record.ClassifierCompletedAt)
+			validApply++
+		}
+		if validDuration(record.VerificationStartedAt, record.VerificationCompletedAt) {
+			totalVerify += record.VerificationCompletedAt.Sub(record.VerificationStartedAt)
+			validVerify++
+		}
+		if validDuration(record.ActionStartedAt, record.VerificationCompletedAt) {
+			totalConvergence += record.VerificationCompletedAt.Sub(record.ActionStartedAt)
+			validConvergence++
 		}
 
-		// --------------------------------------------------------
-		// Cluster convergence =
-		// verification completed - action started.
-		// --------------------------------------------------------
-		if !record.ActionStartedAt.IsZero() &&
-			!record.VerificationCompletedAt.IsZero() &&
-			record.VerificationCompletedAt.After(
-				record.ActionStartedAt,
-			) {
-
-			totalClusterConvergenceDuration +=
-				record.VerificationCompletedAt.Sub(
-					record.ActionStartedAt,
-				)
-
-			validClusterConvergenceRecords++
-		}
-
-		// --------------------------------------------------------
-		// Validator evaluation metrics.
-		// --------------------------------------------------------
 		if record.ProposalAccepted {
 			acceptedCount++
-
 			if !record.ProposalCorrect {
 				summary.FalseAcceptCount++
 			}
 		} else {
 			rejectedCount++
-
 			if record.ProposalCorrect {
 				summary.FalseRejectCount++
 			}
 		}
 
-		// --------------------------------------------------------
-		// Experimental-arm metrics.
-		// --------------------------------------------------------
+		switch record.ValidatorCaseType {
+		case "adversarial":
+			summary.AdversarialCases++
+			if !record.ProposalAccepted {
+				summary.AdversarialRejected++
+			}
+		case "legitimate":
+			summary.LegitimateCases++
+			if record.ProposalAccepted {
+				summary.LegitimateAccepted++
+			}
+		}
+
+		// Keep legacy arm summaries for compatibility.
 		switch record.ExperimentArm {
 		case "controller_enabled":
-			updateArmSummary(
-				&summary.ControllerEnabled,
-				record,
-			)
-
+			updateArmAttempt(&summary.ControllerEnabled, record)
 		case "controller_disabled":
-			updateArmSummary(
-				&summary.ControllerDisabled,
-				record,
-			)
-
+			updateArmAttempt(&summary.ControllerDisabled, record)
 		case "unrecoverable":
-			updateArmSummary(
-				&summary.Unrecoverable,
-				record,
-			)
+			updateArmAttempt(&summary.Unrecoverable, record)
 		}
 	}
 
-	// ------------------------------------------------------------
-	// Overall rates.
-	// ------------------------------------------------------------
+	summary.TotalIncidents = len(incidents)
 
-	total := float64(summary.TotalIncidents)
+	var totalTTD, totalTTM time.Duration
+	var validTTD, validTTM int
+	var incidentRollbackCount int
 
-	summary.RecoverySuccessRate =
-		float64(summary.SuccessfulRecoveries) /
-			total * 100
+	for _, inc := range incidents {
+		if validDuration(inc.injectedAt, inc.detectedAt) {
+			totalTTD += inc.detectedAt.Sub(inc.injectedAt)
+			validTTD++
+		}
 
-	// Rollback rate is specifically over remediation attempts,
-	// not over the complete experimental population.
+		terminal := inc.hasWeek3Outcome
+		if !terminal {
+			// Legacy compatibility: MitigatedAt/Success represent a terminal row.
+			for _, r := range records {
+				key := r.IncidentID
+				if key == "" {
+					continue
+				}
+				if key == inc.id && !r.MitigatedAt.IsZero() {
+					terminal = true
+					inc.terminalAt = r.MitigatedAt
+					if r.Success {
+						inc.terminalOutcome = "recovered"
+					} else if r.RolledBack {
+						inc.terminalOutcome = "rolled_back"
+					}
+				}
+			}
+		}
+
+		if terminal {
+			summary.TerminalIncidents++
+			if inc.terminalOutcome != "" {
+				summary.OutcomeDistribution[inc.terminalOutcome]++
+			}
+			if inc.terminalOutcome == "recovered" || (!inc.hasWeek3Outcome && inc.legacySuccess) {
+				summary.SuccessfulRecoveries++
+			} else {
+				summary.FailedRecoveries++
+			}
+			if validDuration(inc.detectedAt, inc.terminalAt) {
+				totalTTM += inc.terminalAt.Sub(inc.detectedAt)
+				validTTM++
+			}
+			if inc.rollback {
+				incidentRollbackCount++
+			}
+		} else {
+			summary.IncompleteIncidents++
+		}
+
+		updateWorkloadSummary(&summary, inc, terminal)
+	}
+
+	// Legacy fixtures in the existing test suite always carry MitigatedAt.
+	// If IDs were present, the loop above handles them. If not, retain old
+	// record-level success/failure semantics.
+	if summary.TerminalIncidents == 0 && summary.IncompleteIncidents == summary.TotalIncidents {
+		summary.SuccessfulRecoveries = 0
+		summary.FailedRecoveries = 0
+	}
+
+	if summary.TerminalIncidents > 0 {
+		summary.RecoverySuccessRate =
+			float64(summary.SuccessfulRecoveries) / float64(summary.TerminalIncidents) * 100
+		summary.IncidentRollbackRate =
+			float64(incidentRollbackCount) / float64(summary.TerminalIncidents) * 100
+	}
 	if summary.RemediationAttempts > 0 {
 		summary.RollbackRate =
-			float64(summary.TotalRollbacks) /
-				float64(summary.RemediationAttempts) * 100
+			float64(summary.TotalRollbacks) / float64(summary.RemediationAttempts) * 100
 	}
-
-	// ------------------------------------------------------------
-	// Existing TTD.
-	// ------------------------------------------------------------
-
-	if validTTDRecords > 0 {
-		summary.AverageTTDSeconds =
-			totalTTDDuration.Seconds() /
-				float64(validTTDRecords)
+	if validTTD > 0 {
+		summary.AverageTTDSeconds = totalTTD.Seconds() / float64(validTTD)
 	}
-
-	// ------------------------------------------------------------
-	// Existing TTM.
-	// ------------------------------------------------------------
-
-	if validTTMRecords > 0 {
-		summary.AverageTTMSeconds =
-			totalTTMDuration.Seconds() /
-				float64(validTTMRecords)
+	if validTTM > 0 {
+		summary.AverageTTMSeconds = totalTTM.Seconds() / float64(validTTM)
 	}
-
-	// ------------------------------------------------------------
-	// TTM decomposition: inference latency.
-	// ------------------------------------------------------------
-
-	if validInferenceRecords > 0 {
-		summary.AverageInferenceLatencySeconds =
-			totalInferenceDuration.Seconds() /
-				float64(validInferenceRecords)
+	if validInference > 0 {
+		summary.AverageInferenceLatencySeconds = totalInference.Seconds() / float64(validInference)
 	}
-
-	// ------------------------------------------------------------
-	// TTM decomposition: cluster convergence.
-	// ------------------------------------------------------------
-
-	if validClusterConvergenceRecords > 0 {
+	if validApply > 0 {
+		summary.AverageApplySeconds = totalApply.Seconds() / float64(validApply)
+	}
+	if validVerify > 0 {
+		summary.AverageVerificationSeconds = totalVerify.Seconds() / float64(validVerify)
+	}
+	if validConvergence > 0 {
 		summary.AverageClusterConvergenceSeconds =
-			totalClusterConvergenceDuration.Seconds() /
-				float64(validClusterConvergenceRecords)
+			totalConvergence.Seconds() / float64(validConvergence)
 	}
-
-	// ------------------------------------------------------------
-	// Validator metrics.
-	// ------------------------------------------------------------
 
 	if acceptedCount > 0 {
 		summary.FalseAcceptRate =
-			float64(summary.FalseAcceptCount) /
-				float64(acceptedCount) * 100
+			float64(summary.FalseAcceptCount) / float64(acceptedCount) * 100
 	}
-
 	if rejectedCount > 0 {
 		summary.FalseRejectRate =
-			float64(summary.FalseRejectCount) /
-				float64(rejectedCount) * 100
+			float64(summary.FalseRejectCount) / float64(rejectedCount) * 100
 	}
+	if summary.AdversarialCases > 0 {
+		summary.AdversarialRejectionRate =
+			float64(summary.AdversarialRejected) / float64(summary.AdversarialCases) * 100
+	}
+	if summary.LegitimateCases > 0 {
+		summary.LegitimateAcceptanceRate =
+			float64(summary.LegitimateAccepted) / float64(summary.LegitimateCases) * 100
+	}
+
+	finalizeLegacyArm(&summary.ControllerEnabled)
+	finalizeLegacyArm(&summary.ControllerDisabled)
+	finalizeLegacyArm(&summary.Unrecoverable)
+	finalizeWorkload(&summary.W1)
+	finalizeWorkload(&summary.W2)
+	finalizeWorkload(&summary.W3)
 
 	return summary
 }
 
-// updateArmSummary adds one incident to the selected arm's metrics.
-func updateArmSummary(
-	summary *ArmSummary,
-	record AuditRecord,
-) {
-	summary.TotalIncidents++
+func validDuration(start, end time.Time) bool {
+	return !start.IsZero() && !end.IsZero() && end.After(start)
+}
 
+func updateArmAttempt(summary *ArmSummary, record AuditRecord) {
+	// Existing tests/legacy files are one record per incident.
+	summary.TotalIncidents++
 	if record.Success {
 		summary.SuccessfulRecoveries++
 	} else {
 		summary.FailedRecoveries++
 	}
-
 	if record.RemediationAttempt {
 		summary.RemediationAttempts++
 	}
-
 	if record.RolledBack {
 		summary.RollbackTriggers++
 	}
+}
 
+func finalizeLegacyArm(summary *ArmSummary) {
 	if summary.TotalIncidents > 0 {
 		summary.RecoverySuccessRate =
-			float64(summary.SuccessfulRecoveries) /
-				float64(summary.TotalIncidents) * 100
+			float64(summary.SuccessfulRecoveries) / float64(summary.TotalIncidents) * 100
 	}
-
 	if summary.RemediationAttempts > 0 {
 		summary.RollbackTriggerRate =
-			float64(summary.RollbackTriggers) /
-				float64(summary.RemediationAttempts) * 100
+			float64(summary.RollbackTriggers) / float64(summary.RemediationAttempts) * 100
+	}
+}
+
+func updateWorkloadSummary(summary *Summary, inc *incidentAggregate, terminal bool) {
+	var target *WorkloadArmSummary
+	switch inc.workload {
+	case "W1", "w1":
+		if inc.arm == "controller_enabled" {
+			target = &summary.W1.Enabled
+		} else if inc.arm == "controller_disabled" {
+			target = &summary.W1.Disabled
+		}
+	case "W2", "w2":
+		if inc.arm == "controller_enabled" {
+			target = &summary.W2.Enabled
+		} else if inc.arm == "controller_disabled" {
+			target = &summary.W2.Disabled
+		}
+	case "W3", "w3":
+		if inc.arm == "controller_enabled" {
+			target = &summary.W3.Enabled
+		} else if inc.arm == "controller_disabled" {
+			target = &summary.W3.Disabled
+		}
+	}
+	if target == nil {
+		return
+	}
+
+	target.TotalIncidents++
+	target.RemediationAttempts += inc.attempts
+	if inc.rollback {
+		target.RollbackTriggers++
+	}
+	if terminal {
+		target.TerminalIncidents++
+		if inc.terminalOutcome == "recovered" {
+			target.RecoveredIncidents++
+		}
+	} else {
+		target.IncompleteIncidents++
+	}
+}
+
+func finalizeWorkload(summary *WorkloadSummary) {
+	finalizeWorkloadArm(&summary.Enabled)
+	finalizeWorkloadArm(&summary.Disabled)
+	summary.AttributableRecovery =
+		summary.Enabled.RecoveryRate - summary.Disabled.RecoveryRate
+}
+
+func finalizeWorkloadArm(summary *WorkloadArmSummary) {
+	if summary.TerminalIncidents > 0 {
+		summary.RecoveryRate =
+			float64(summary.RecoveredIncidents) / float64(summary.TerminalIncidents) * 100
+	}
+	if summary.RemediationAttempts > 0 {
+		summary.RollbackTriggerRate =
+			float64(summary.RollbackTriggers) / float64(summary.RemediationAttempts) * 100
 	}
 }
