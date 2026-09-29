@@ -3,6 +3,7 @@ package classifier
 import "strings"
 
 const claudeSonnet5Model = "claude-sonnet-5"
+const claudeSonnet45Model = "claude-sonnet-4-5-20250929"
 
 type TokenUsage struct {
 	InputTokens  int
@@ -42,6 +43,11 @@ func PricingForModel(model string) (ModelPricing, bool) {
 		return ModelPricing{
 			InputPerMillionUSD:  2,
 			OutputPerMillionUSD: 10,
+		}, true
+	case claudeSonnet45Model:
+		return ModelPricing{
+			InputPerMillionUSD:  3,
+			OutputPerMillionUSD: 15,
 		}, true
 	default:
 		return ModelPricing{}, false
