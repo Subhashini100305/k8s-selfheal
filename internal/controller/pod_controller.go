@@ -61,41 +61,20 @@ type PodReconciler struct {
 	Audit     safety.AuditWriter
 	Clock     safety.Clock
 
-	// inFlight tracks Deployments currently undergoing remediation, keyed by
+	// incidents holds one remediation record per Deployment, keyed by
 	// "namespace/OwnerDeployment" — deliberately NOT pod UID. RestartPod
 	// deletes the crash-looping pod and the ReplicaSet controller creates a
-	// replacement with a brand-new UID; a UID-keyed guard would not recognize
-	// that replacement re-crashing as the same in-flight remediation, which
-	// defeats the guard's entire purpose. sync.Map is used rather than a
-	// mutex+map because this access pattern — many concurrent presence
-	// checks (LoadOrStore) per reconcile, comparatively rare writes, keys
-	// that come and go rather than accumulate — is exactly what sync.Map is
-	// documented to optimize for, and it needs no separate lock to get
-	// right under concurrent reconciles (controller-runtime runs
-	// MaxConcurrentReconciles workers by default).
-	inFlight sync.Map // key: string ("namespace/deployment"), value: struct{}
-}
-
-// inFlightKey builds the guard key for a namespace/Deployment pair.
-func inFlightKey(namespace, ownerDeployment string) string {
-	return namespace + "/" + ownerDeployment
-}
-
-// tryStartRemediation marks (namespace, ownerDeployment) as in-flight if it
-// is not already. It reports false if remediation is already in progress
-// for this Deployment, in which case the caller must skip and not act.
-func (r *PodReconciler) tryStartRemediation(namespace, ownerDeployment string) bool {
-	_, alreadyInFlight := r.inFlight.LoadOrStore(inFlightKey(namespace, ownerDeployment), struct{}{})
-	return !alreadyInFlight
-}
-
-// finishRemediation clears the in-flight marker for (namespace,
-// ownerDeployment). Must be called exactly once per successful
-// tryStartRemediation, on every exit path — success, rollback, or error —
-// or the guard leaks and permanently blocks future remediation for that
-// Deployment.
-func (r *PodReconciler) finishRemediation(namespace, ownerDeployment string) {
-	r.inFlight.Delete(inFlightKey(namespace, ownerDeployment))
+	// replacement with a brand-new UID; a UID-keyed record would not recognize
+	// that replacement re-crashing as the same incident, which defeats the
+	// whole point of tracking one.
+	//
+	// Guarded by mu rather than being a sync.Map: this used to be a
+	// presence-only set, where LoadOrStore gave atomic claim-if-absent in a
+	// single call. An incident is read-modify-write state instead — budget,
+	// backoff and cooldown are evaluated against one snapshot and written
+	// back — so the value needs a lock either way. See incident.go.
+	mu        sync.Mutex
+	incidents map[string]*incidentRecord
 }
 
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;delete
@@ -155,16 +134,44 @@ func (r *PodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 				break
 			}
 
-			if !r.tryStartRemediation(event.Namespace, event.OwnerDeployment) {
-				logger.Info("remediation already in flight for this deployment, skipping",
+			// metadata.generation is read before the admission decision
+			// because the decision depends on it: a changed generation is the
+			// only thing that resurrects an incident we gave up on. A failed
+			// read is non-fatal — generation 0 simply never matches a stored
+			// non-zero one, so the record is left alone.
+			generation, genErr := r.deploymentGeneration(ctx, event.Namespace, event.OwnerDeployment)
+			if genErr != nil {
+				logger.Error(genErr, "could not read deployment generation, proceeding without cooldown reset",
 					"namespace", event.Namespace, "deployment", event.OwnerDeployment)
+			}
+
+			key := incidentKey(event.Namespace, event.OwnerDeployment)
+			record, decision := r.beginAttempt(key, generation, time.Now())
+			if decision == admitExhausted {
+				// Logged exactly once: beginAttempt sets the terminal outcome
+				// here, so every later reconcile takes the sticky-exhausted
+				// branch and returns admitSkip instead.
+				logger.Info("EXHAUSTED — attempt budget spent, going quiet until the deployment changes",
+					"namespace", event.Namespace, "deployment", event.OwnerDeployment,
+					"incidentID", record.id, "attempts", record.attemptCount)
+			}
+			if decision != admitProceed {
+				if decision == admitSkip {
+					logger.Info("remediation already in flight for this deployment, skipping",
+						"namespace", event.Namespace, "deployment", event.OwnerDeployment,
+						"incidentID", record.id, "attempts", record.attemptCount,
+						"inFlight", record.inFlight, "terminalOutcome", record.terminalOutcome)
+				}
 				break
 			}
+
+			event.IncidentID = record.id
+
 			if r.Classifier == nil {
 				logger.Error(fmt.Errorf("PodReconciler.Classifier is not configured"),
 					"cannot classify incident — escalating by default rather than automating blind",
 					"namespace", event.Namespace, "pod", event.PodName)
-				r.finishRemediation(event.Namespace, event.OwnerDeployment)
+				r.endAttempt(key, OutcomeEscalated, time.Now())
 				break
 			}
 
@@ -212,7 +219,7 @@ func (r *PodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 					"reasoning", proposal.Reasoning,
 					"fallbackUsed", classification.FallbackUsed,
 					"fallbackReason", classification.FallbackReason)
-				r.finishRemediation(event.Namespace, event.OwnerDeployment)
+				r.endAttempt(key, OutcomeEscalated, time.Now())
 				break
 			}
 
@@ -225,9 +232,11 @@ func (r *PodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 				logger.Error(fmt.Errorf("no remediation action registered for %q", proposal.RecommendedAction),
 					"classifier recommended an action with no matching implementation — escalating instead",
 					"namespace", event.Namespace, "pod", event.PodName)
-				r.finishRemediation(event.Namespace, event.OwnerDeployment)
+				r.endAttempt(key, OutcomeRejected, time.Now())
 				break
 			}
+
+			event.AttemptNumber = r.recordAttempt(key, time.Now())
 
 			service := &safety.Service{
 				Snapshots: r.Snapshots,
@@ -246,17 +255,27 @@ func (r *PodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 			// goroutine so it stays held for the whole Remediate() lifetime,
 			// per Ananya's review note, not released early as before.
 			go func() {
-				defer r.finishRemediation(event.Namespace, event.OwnerDeployment)
+				// result is read by the deferred endAttempt, so it must be
+				// declared before it: "" (an errored attempt) and rolled_back
+				// both leave the incident active to retry under backoff, and
+				// the defer guarantees the in-flight claim is released even
+				// if Remediate panics.
+				result := ""
+				defer func() { r.endAttempt(key, result, time.Now()) }()
+
 				outcome, err := service.Remediate(r.ManagerCtx, event)
 				if err != nil {
 					logger.Error(err, "remediation failed",
 						"namespace", event.Namespace, "deployment", event.OwnerDeployment,
-						"action", action.Name())
+						"action", action.Name(), "incidentID", event.IncidentID,
+						"attempt", event.AttemptNumber)
 					return
 				}
+				result = string(outcome.Result)
 				logger.Info("remediation finished",
 					"namespace", event.Namespace, "deployment", event.OwnerDeployment,
-					"action", action.Name(), "result", outcome.Result, "mttr", outcome.MTTR)
+					"action", action.Name(), "result", outcome.Result, "mttr", outcome.MTTR,
+					"incidentID", event.IncidentID, "attempt", event.AttemptNumber)
 			}()
 			break
 		}

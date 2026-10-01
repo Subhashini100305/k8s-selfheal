@@ -11,4 +11,14 @@ type DetectionEvent struct {
 	RestartCount    int32
 	OwnerDeployment string // empty if not Deployment-owned
 	Timestamp       time.Time
+
+	// IncidentID and AttemptNumber identify which remediation attempt this
+	// event belongs to. Owner 1 sets both; Owner 2 copies them onto every
+	// audit line so the metrics module can group transitions into attempts
+	// and attempts into incidents (docs/measurement-definitions.md §1, §6).
+	// An incident runs 1..MaxAttempts attempts; AttemptNumber is 1-based and
+	// stays 0 for an incident that escalated or was rejected before any
+	// action ran.
+	IncidentID    string
+	AttemptNumber int
 }
