@@ -607,3 +607,26 @@ func TestIncident_NewIncidentCollectsFreshEvidence(t *testing.T) {
 		t.Error("a new incident must collect fresh evidence, not inherit the previous incident's bundle")
 	}
 }
+
+func TestIncident_BackoffRunsFromAttemptEndNotAttemptStart(t *testing.T) {
+	// An attempt occupies about 30s of wall clock — the verifier's readiness
+	// timeout — and measuring backoff from its start lets that duration eat
+	// the backoff. The first deployed run showed a 12s gap between attempts
+	// where the definitions document promises 30s.
+	r := &PodReconciler{}
+	key := incidentKey("ns1", "dep1")
+	started := time.Now()
+	finished := started.Add(30 * time.Second) // a realistic attempt duration
+
+	r.beginAttempt(key, 1, started)
+	r.recordAttempt(key, started)
+	r.endAttempt(key, string(safety.OutcomeRolledBack), finished)
+
+	// Measured from the start, 30s of backoff would already have elapsed here.
+	if _, d := r.beginAttempt(key, 1, finished.Add(AttemptBackoffBase-time.Second)); d != admitSkip {
+		t.Error("backoff must run from when the attempt finished, not from when it started")
+	}
+	if _, d := r.beginAttempt(key, 1, finished.Add(AttemptBackoffBase)); d != admitProceed {
+		t.Error("the next attempt must be admitted once a full backoff has elapsed since the previous one finished")
+	}
+}

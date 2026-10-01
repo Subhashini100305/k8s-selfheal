@@ -41,7 +41,7 @@ type incidentRecord struct {
 	id              string
 	attemptCount    int
 	firstDetectedAt time.Time
-	lastAttemptAt   time.Time
+	lastAttemptAt   time.Time // when the last attempt FINISHED — backoff counts from here
 	terminalOutcome string // empty while the incident is still active
 	terminalAt      time.Time
 	generation      int64 // Deployment metadata.generation last seen
@@ -148,7 +148,8 @@ func (r *PodReconciler) recordAttempt(key string, now time.Time) int {
 		return 0
 	}
 	record.attemptCount++
-	record.lastAttemptAt = now
+	// lastAttemptAt is deliberately not set here. Backoff runs from when an
+	// attempt finishes, not when it starts — see endAttempt.
 	return record.attemptCount
 }
 
@@ -168,15 +169,24 @@ func (r *PodReconciler) endAttempt(key, outcome string, now time.Time) {
 	}
 	record.inFlight = false
 	if outcome == "" || outcome == string(safety.OutcomeRolledBack) {
+		// Backoff is measured from here, the moment the attempt finished,
+		// rather than from when it started. An attempt takes about 30s of
+		// wall clock (the verifier's readiness timeout) and measuring from
+		// its start lets that duration eat the backoff: the first deployed
+		// run showed a 12s gap between attempts where the definitions
+		// document promises 30s. "30s after attempt 1" means after it
+		// completes.
+		record.lastAttemptAt = now
 		return
 	}
 	record.terminalOutcome = outcome
 	record.terminalAt = now
 }
 
-// attemptBackoff is how long to wait before the next attempt, given how many
-// have already completed: 30s after the first, 60s after the second. The shift
-// is bounded because MaxAttempts caps the input.
+// attemptBackoff is how long to wait after an attempt finishes before the next
+// one may start, given how many have already completed: 30s after the first,
+// 60s after the second. The shift is bounded because MaxAttempts caps the
+// input.
 func attemptBackoff(completedAttempts int) time.Duration {
 	return AttemptBackoffBase << (completedAttempts - 1)
 }

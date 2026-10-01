@@ -77,11 +77,19 @@ report states it before presenting any TTM figure.
 | Parameter | Value |
 |---|---|
 | `MaxAttempts` | 3 per incident |
-| Backoff between attempts | 30s after attempt 1, 60s after attempt 2 |
+| Backoff between attempts | 30s after attempt 1, 60s after attempt 2 — measured from when the previous attempt **finished** |
 | Cooldown after terminal outcome | 5 minutes per Deployment |
 
 After `MaxAttempts` is reached without recovery, the incident ends as
 `exhausted` and the controller stops acting on that Deployment.
+
+Backoff runs from the **end** of the previous attempt, not its start. An
+attempt occupies roughly 30s of wall clock on a workload that never becomes
+Ready (the verifier's readiness timeout), so measuring from the start would let
+that duration consume the backoff — the first deployed run produced a 12s gap
+between attempts where this table promises 30s. With one incident spanning at
+most three attempts, expect it to reach `exhausted` about 3.5 minutes after
+detection.
 
 Cooldown suppresses re-detection of the same Deployment after `recovered`,
 `escalated` or `rejected`. It is **reset early if the Deployment's
