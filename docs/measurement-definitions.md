@@ -83,10 +83,20 @@ report states it before presenting any TTM figure.
 After `MaxAttempts` is reached without recovery, the incident ends as
 `exhausted` and the controller stops acting on that Deployment.
 
-Cooldown suppresses re-detection of the same Deployment after any terminal
-outcome. It is **reset early if the Deployment's `metadata.generation`
-changes**, since a generation change means a human or a new rollout
-intervened and the situation is no longer the one we gave up on.
+Cooldown suppresses re-detection of the same Deployment after `recovered`,
+`escalated` or `rejected`. It is **reset early if the Deployment's
+`metadata.generation` changes**, since a generation change means a human or a
+new rollout intervened and the situation is no longer the one we saw.
+
+`exhausted` is the exception: it does **not** expire with the cooldown. Only a
+generation change clears it. Letting it expire would re-arm the controller on
+a Deployment we already gave up on — the same unbounded loop the budget exists
+to stop. With three attempts at roughly 90s each plus backoff, an incident
+exhausts at about minute 3; a 5-minute cooldown would have the controller
+acting again at about minute 8, which fails the acceptance test ("confirm it
+goes quiet; if it is still acting at minute 10 the fix is incomplete"). It also
+keeps the rollback denominator well defined: one injection produces exactly one
+incident, not one every eight minutes.
 
 ## 6. Shared audit fields
 
