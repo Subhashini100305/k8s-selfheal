@@ -91,6 +91,11 @@ between attempts where this table promises 30s. With one incident spanning at
 most three attempts, expect it to reach `exhausted` about 3.5 minutes after
 detection.
 
+The backoff is a floor, not an exact interval. A new attempt can only begin on
+the next reconcile, and reconciles fire when the Pod's status changes — on the
+kubelet's own crash-loop schedule. Measured on W3 in deployed mode, the gaps
+between attempts were 40s and 91s against promised minima of 30s and 60s.
+
 Cooldown suppresses re-detection of the same Deployment after `recovered`,
 `escalated` or `rejected`. It is **reset early if the Deployment's
 `metadata.generation` changes**, since a generation change means a human or a
