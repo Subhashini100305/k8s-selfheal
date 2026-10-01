@@ -198,3 +198,147 @@ ROLLED_BACK → LOGGED` for the last two.
 kubectl delete deployment -l 'app in (transient-recovers-demo,transient-unrecoverable-demo,rollout-fixable-demo,rollout-unrecoverable-demo)'
 docker exec selfheal-control-plane rm -rf /tmp/k8s-selfheal
 ```
+
+---
+
+# The three named experiment workloads (Week 3)
+
+The four scenarios above are the Week 2 *demo* set — they prove each terminal
+outcome individually. The experiment runs on a different, frozen set of
+**three** workloads, chosen so that every contribution claim has something to
+measure. IDs are stable and appear in the audit log's `workload` field; do not
+rename them.
+
+| ID | Manifest | What it is | Without controller | With controller |
+|---|---|---|---|---|
+| **W1** | `w1-transient.yaml` | Transient crasher, self-recovers after 3 failed starts | **Recovers unaided** in ~70s | `restart_pod` resets the counter → verification fails → `rolled_back`, then `exhausted` |
+| **W2** | `rollout-fixable.yaml` | Bad current revision, good previous | Never recovers | `rollout_undo` → `recovered` |
+| **W3** | `rollout-unrecoverable.yaml` | Bad current **and** previous revision | Never recovers | Fix applied → verification fails → `rolled_back` ×3 → `exhausted` |
+
+W1 is new. W2 and W3 are the two rollout scenarios above, under experiment IDs.
+The two `transient-*` manifests stay as demo material and are **not** part of
+the experiment set.
+
+## Why W1 exists
+
+W2 and W3 are both built so Kubernetes cannot self-heal them. Run with the
+controller disabled, both return 0/5 — so "recovery net of a null-action
+baseline" compares against zero and says nothing. W1 is the one workload whose
+control arm is nonzero, which is the only reason that contribution produces a
+finding at all.
+
+## The W1 finding — expect this, do not fix it
+
+W1 counts its starts in a file on an `emptyDir` volume. `emptyDir` lives for
+the lifetime of the **pod**: a container restart inside the same pod keeps it,
+so the counter advances across the kubelet's own back-off (10s, 20s, 40s) and
+the workload comes up healthy on its own after roughly 70 seconds.
+
+`restart_pod` deletes the pod. The replacement gets a brand-new, empty
+`emptyDir`, so its counter starts again at 1 and it crash-loops three more
+times from scratch. Two consequences:
+
+1. **The controller makes W1 slower to recover than doing nothing.**
+2. The replacement cannot reach Ready inside the 30s readiness timeout, so
+   verification fails and the attempt is recorded `rolled_back`.
+
+So arm A1 (enabled) should look *worse* than A2 (disabled), and attributable
+recovery for W1 should come out **negative**. That is a real result about the
+limits of a blunt remediation action, it is why the paired control arm exists
+at all, and it belongs in the report as a finding. Record it; do not retune the
+workload to make the controller look better.
+
+## Per-arm setup and teardown
+
+Each run is one fault injection. Record the injection timestamp — it is the
+start of TTD.
+
+### W1 — both arms
+
+```bash
+# inject
+kubectl apply -f hack/manifests/w1-transient.yaml
+# observe until terminal, then
+kubectl delete -f hack/manifests/w1-transient.yaml
+```
+
+No node-level state to reset: the counter lives on the pod's `emptyDir` and
+dies with the Deployment. W1 is the only workload that is genuinely
+repeatable with a single `apply`.
+
+### W2 — both arms
+
+Needs two revisions: a known-good one to roll back *to*, then a bad one.
+
+```bash
+# revision 1 — known good. sed the FILE, not `kubectl -o yaml` output:
+# -o yaml re-renders the command as an unquoted YAML list, so a quoted
+# pattern silently fails to match and revision 1 gets the broken command.
+sed 's/"sleep 1; exit 1"/"sleep 3600"/' hack/manifests/rollout-fixable.yaml \
+  | kubectl apply -f -
+kubectl rollout status deployment/rollout-fixable-demo
+
+# revision 2 — the fault injection. Timestamp this.
+kubectl patch deployment rollout-fixable-demo --type=json -p \
+  '[{"op":"replace","path":"/spec/template/spec/containers/0/command","value":["sh","-c","sleep 1; exit 1"]}]'
+
+# observe until terminal, then
+kubectl delete deployment rollout-fixable-demo
+```
+
+### W3 — both arms
+
+```bash
+# revision 1 — already broken, on purpose
+sed 's/"echo bad-2; exit 1"/"echo bad-1; exit 1"/' hack/manifests/rollout-unrecoverable.yaml \
+  | kubectl apply -f -
+
+# wait for CrashLoopBackOff, then inject an equally broken revision 2
+kubectl patch deployment rollout-unrecoverable-demo --type=json -p \
+  '[{"op":"replace","path":"/spec/template/spec/containers/0/command","value":["sh","-c","echo bad-2; exit 1"]}]'
+
+# observe until exhausted, then
+kubectl delete deployment rollout-unrecoverable-demo
+```
+
+**Keep each workload to exactly two revisions.** `revisionHistoryLimit`
+defaults to 10, so more rollouts than that garbage-collect the known-good
+ReplicaSet `rollout_undo` needs as a target.
+
+## Running the disabled arm
+
+The control arm is the same injection with the controller not running. Stop it
+rather than reconfiguring it, so there is no question of a partially-active
+controller:
+
+```bash
+# deployed mode
+kubectl scale -n k8s-selfheal-system deployment/k8s-selfheal-controller-manager --replicas=0
+# ... run the injection, observe, teardown ...
+kubectl scale -n k8s-selfheal-system deployment/k8s-selfheal-controller-manager --replicas=1
+```
+
+Disabled-arm runs produce no audit lines, so recovery has to be observed from
+the cluster itself — watch for the pod reaching Ready and staying Ready for
+60s, applying the same recovery definition by hand so the two arms are
+comparable:
+
+```bash
+kubectl get pods -l app=w1-transient -w
+```
+
+## What "terminal" looks like per workload
+
+Watch the manager log. Each incident ends exactly once.
+
+```
+recovered   → "remediation finished ... result=recovered"
+rolled_back → "remediation finished ... result=rolled_back"   (may repeat up to 3×)
+exhausted   → "EXHAUSTED — attempt budget spent, going quiet until the deployment changes"
+escalated   → "ESCALATED — not safe for automation"
+```
+
+After `exhausted`, the controller goes **silent** on that Deployment until its
+`metadata.generation` changes. If you see further activity on it, the attempt
+budget is not working — that is the single most important thing to confirm
+before the run block.

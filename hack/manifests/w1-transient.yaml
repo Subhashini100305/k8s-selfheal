@@ -1,0 +1,93 @@
+# W1 — transient crasher that RECOVERS ON ITS OWN.
+#
+# This is the workload that makes the null-action baseline mean anything. The
+# other two (W2, W3) are built so Kubernetes cannot possibly self-heal them, so
+# their control arm returns 0/5 and "recovery net of baseline" says nothing. W1
+# is the opposite: Kubernetes' own restart back-off genuinely fixes it, with no
+# controller involved at all.
+#
+# How: the container counts its own starts in a file on an emptyDir volume. The
+# first three starts exit non-zero; the fourth and later run normally.
+#
+#   emptyDir lives for the lifetime of the POD, on the node. A container
+#   *restart* inside the same pod keeps it, so the counter advances 1 -> 2 -> 3
+#   -> 4 across the kubelet's own restarts and the workload comes up healthy on
+#   its own after roughly 70s (the back-off schedule is 10s, 20s, 40s).
+#
+#   Deleting the POD destroys it. A replacement pod gets a brand-new, empty
+#   emptyDir, so its counter starts again at 1.
+#
+# THE FINDING — this is the point of W1, not a bug in it:
+#   restart_pod deletes the pod. That resets the counter, so the replacement
+#   crash-loops three more times from scratch. The controller therefore makes
+#   W1 take LONGER to recover than leaving it alone, and because the
+#   replacement cannot become Ready inside the 30s readiness timeout,
+#   verification fails and the attempt is recorded as rolled_back. Expect the
+#   enabled arm to look worse than the disabled arm on this workload, and
+#   expect attributable recovery to come out negative.
+#
+#   That is a real, reportable result about the limits of a blunt remediation
+#   action, and it is exactly why the paired control arm exists. Record it; do
+#   not "fix" the workload to hide it.
+#
+# The log line matters as much as the exit code: "connection refused" is what
+# makes the classifier propose transient_failure -> restart_pod and what
+# satisfies the semantic guard for that sub-cause. Without wording the guard
+# recognises, the incident escalates and restart_pod is never exercised.
+#
+# No readiness probe, deliberately: with none defined, Ready follows Running,
+# so the verifier's readiness phase is testing container start rather than
+# application health. That keeps W1 measuring the crash loop and nothing else.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: w1-transient
+  labels:
+    app: w1-transient
+    sage.selfheal.local/workload: W1
+spec:
+  replicas: 1
+  revisionHistoryLimit: 2
+  selector:
+    matchLabels:
+      app: w1-transient
+  template:
+    metadata:
+      labels:
+        app: w1-transient
+        sage.selfheal.local/workload: W1
+    spec:
+      # Nothing here needs to outlive the pod, and a short grace period keeps
+      # restart_pod's delete from adding seconds to every measured attempt.
+      terminationGracePeriodSeconds: 1
+      volumes:
+        - name: state
+          emptyDir: {}
+      containers:
+        # Pinned tag, not :latest. A :latest tag makes Kubernetes default
+        # imagePullPolicy to Always, which is what caused an ImagePullBackOff
+        # on a kind cluster that already had the image loaded locally.
+        - name: app
+          image: busybox:1.36
+          volumeMounts:
+            - name: state
+              mountPath: /state
+          command:
+            - sh
+            - -c
+            - |
+              COUNT=$(cat /state/starts 2>/dev/null || echo 0)
+              COUNT=$((COUNT + 1))
+              echo "$COUNT" > /state/starts
+              if [ "$COUNT" -le 3 ]; then
+                echo "start $COUNT: dial tcp 10.96.0.99:5432: connect: connection refused"
+                exit 1
+              fi
+              echo "start $COUNT: dependency reachable, serving"
+              sleep 3600
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              memory: 32Mi

@@ -143,3 +143,21 @@ be exactly zero, not a measurement.
   stability-window sensitivity either.
 - N=5 per arm gives a direction, not a confidence interval. We report counts,
   never a bare percentage.
+- **Evidence is frozen at detection and reused for every attempt in an
+  incident.** A cause that only becomes visible *after* the first attempt is
+  therefore never seen, and all three attempts are classified against
+  pre-action evidence. This is deliberate — it preserves attribution, because
+  every attempt then reasons about the same fault rather than about our own
+  remediation — but it is a real loss. Re-collecting per attempt was worse:
+  the collector keeps the newest 25 Events, and remediation generates a burst
+  of its own (`Killing`, `SuccessfulDelete`, `SuccessfulCreate`,
+  `ScalingReplicaSet`), so by attempt 2 the original cause has been pushed out
+  of the window entirely.
+- The plan called for filtering Events whose source is the SAGE controller.
+  **That filter would match nothing** — SAGE emits no Kubernetes Events at all
+  (no `EventRecorder` exists anywhere in the repo). The crowding Events come
+  from Kubernetes' own controllers reacting to our action, and filtering by
+  their reporting component would also drop `BackOff`, reported by the kubelet
+  and the signal we most need. Freezing at detection is the filter: nothing
+  that happened after we began acting can enter the bundle, whoever reported
+  it.
