@@ -105,14 +105,14 @@ func escalateProposal() classifier.Proposal {
 	}
 }
 
-// waitForGuardCleared polls until the in-flight guard for
-// testNamespace/testDeploymentName clears. Every test in this file builds
+// waitForGuardCleared polls until the in-flight claim for
+// testNamespace/testDeploymentName is released. Every test in this file builds
 // its pod via ownedPod, so that's the only key in play — not parameters.
 func waitForGuardCleared(t *testing.T, r *PodReconciler) {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
 	for {
-		if _, stillInFlight := r.inFlight.Load(inFlightKey(testNamespace, testDeploymentName)); !stillInFlight {
+		if !r.claimHeld(incidentKey(testNamespace, testDeploymentName)) {
 			return
 		}
 		if time.Now().After(deadline) {
@@ -348,8 +348,8 @@ func TestReconcile_NoOwnerDeployment_EscalatesWithoutTakingTheGuard(t *testing.T
 	if !sink.has("ESCALATED — no owner Deployment resolved") {
 		t.Error("expected an ownerless pod to escalate")
 	}
-	if _, taken := r.inFlight.Load(inFlightKey(testNamespace, "")); taken {
-		t.Error("the guard must not be taken for an ownerless pod — the empty key would block every other ownerless pod in the namespace")
+	if r.claimHeld(incidentKey(testNamespace, "")) {
+		t.Error("no incident may be opened for an ownerless pod — the empty key would block every other ownerless pod in the namespace")
 	}
 	select {
 	case <-action.called:

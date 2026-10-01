@@ -5,6 +5,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/go-logr/logr"
 	appsv1 "k8s.io/api/apps/v1"
@@ -16,7 +17,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	"github.com/aryausingh/k8s-selfheal/internal/classifier"
 	"github.com/aryausingh/k8s-selfheal/internal/contracts"
+	"github.com/aryausingh/k8s-selfheal/internal/safety"
 )
 
 // --- test scaffolding -------------------------------------------------
@@ -275,15 +278,18 @@ func TestReconcile_PodGone_NoError(t *testing.T) {
 	}
 }
 
-// --- Reconcile: in-flight guard integration -----------------------------
+// --- Reconcile: incident admission integration ---------------------------
 
 func TestReconcile_InFlightGuard_SkipsAlreadyRemediatingDeployment(t *testing.T) {
 	deploy, rs, pod := ownedPod(crashingContainerStatus("main", 3))
 	r := &PodReconciler{Client: fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(deploy, rs, pod).Build()}
-	// Simulate remediation already in progress for this Deployment, exactly
-	// as if an earlier reconcile for a sibling pod under the same Deployment
+	// Simulate an attempt already running for this Deployment, exactly as if
+	// an earlier reconcile for a sibling pod under the same Deployment had
 	// started it.
-	r.inFlight.Store(inFlightKey(testNamespace, testDeploymentName), struct{}{})
+	key := incidentKey(testNamespace, testDeploymentName)
+	if _, decision := r.beginAttempt(key, 1, time.Now()); decision != admitProceed {
+		t.Fatalf("setup: expected to claim a fresh incident, got %v", decision)
+	}
 	ctx, sink := newTestContext()
 
 	_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: testNamespace, Name: testPodName}})
@@ -294,39 +300,310 @@ func TestReconcile_InFlightGuard_SkipsAlreadyRemediatingDeployment(t *testing.T)
 	if !sink.has(skippedMsg) {
 		t.Error("expected the in-flight guard to log a skip")
 	}
-	if _, stillInFlight := r.inFlight.Load(inFlightKey(testNamespace, testDeploymentName)); !stillInFlight {
-		t.Error("the guard entry belongs to the earlier remediation and must survive a skipped reconcile — it must only be cleared by whoever started it")
+	if !r.incidents[key].inFlight {
+		t.Error("the claim belongs to the earlier attempt and must survive a skipped reconcile — only whoever started it may release it")
 	}
 }
 
-// --- guard methods in isolation (Task 3) --------------------------------
+// --- incident budget, backoff and cooldown (Week 3 Task 1/2) -------------
 
-func TestInFlightGuard_StartFinishStart(t *testing.T) {
+// drive runs one full attempt — claim, record, finish with the given outcome —
+// and reports whether it was admitted. Returns false when the budget, backoff
+// or cooldown blocked it.
+func drive(r *PodReconciler, key string, generation int64, now time.Time, outcome string) (admission, int) {
+	_, decision := r.beginAttempt(key, generation, now)
+	if decision != admitProceed {
+		return decision, 0
+	}
+	attempt := r.recordAttempt(key, now)
+	r.endAttempt(key, outcome, now)
+	return decision, attempt
+}
+
+func TestIncident_BudgetStopsAtMaxAttemptsAndGoesQuiet(t *testing.T) {
 	r := &PodReconciler{}
+	key := incidentKey("ns1", "dep1")
+	start := time.Now()
 
-	if !r.tryStartRemediation("ns1", "dep1") {
-		t.Fatal("first call for a fresh key must succeed")
-	}
-	if r.tryStartRemediation("ns1", "dep1") {
-		t.Fatal("second call for the same key while in-flight must be rejected")
-	}
-	if !r.tryStartRemediation("ns1", "dep2") {
-		t.Fatal("a different deployment in the same namespace must not be blocked by an unrelated in-flight entry")
+	// Three failed attempts, each after its backoff has elapsed.
+	for i := 1; i <= MaxAttempts; i++ {
+		at := start.Add(time.Duration(i) * 10 * time.Minute)
+		decision, attempt := drive(r, key, 1, at, string(safety.OutcomeRolledBack))
+		if decision != admitProceed {
+			t.Fatalf("attempt %d: expected admitProceed, got %v", i, decision)
+		}
+		if attempt != i {
+			t.Fatalf("attempt %d: recorded attempt number %d", i, attempt)
+		}
 	}
 
-	r.finishRemediation("ns1", "dep1")
-	if !r.tryStartRemediation("ns1", "dep1") {
-		t.Fatal("after finishRemediation, the key must be acquirable again")
+	// The fourth must not run; it ends the incident instead.
+	_, decision := r.beginAttempt(key, 1, start.Add(time.Hour))
+	if decision != admitExhausted {
+		t.Fatalf("after %d attempts expected admitExhausted, got %v", MaxAttempts, decision)
+	}
+	if got := r.incidents[key].terminalOutcome; got != OutcomeExhausted {
+		t.Fatalf("terminal outcome = %q, want %q", got, OutcomeExhausted)
+	}
+
+	// Exhausted is sticky, and reported exactly once. This is the acceptance
+	// test from the Week 3 plan: a permanently-broken Deployment must be
+	// silent at minute 10, so the cooldown must NOT re-arm it.
+	for _, after := range []time.Duration{time.Minute, 10 * time.Minute, 24 * time.Hour} {
+		if _, d := r.beginAttempt(key, 1, start.Add(time.Hour+after)); d != admitSkip {
+			t.Fatalf("%v after exhausting the budget: got %v, want admitSkip", after, d)
+		}
 	}
 }
 
-func TestInFlightGuard_KeyedByNamespaceAndDeployment_NotPodUID(t *testing.T) {
-	// The locked design explicitly rejects a UID-keyed guard: RestartPod
+func TestIncident_BackoffBlocksAnImmediateRetry(t *testing.T) {
+	r := &PodReconciler{}
+	key := incidentKey("ns1", "dep1")
+	start := time.Now()
+
+	drive(r, key, 1, start, string(safety.OutcomeRolledBack))
+
+	if _, d := r.beginAttempt(key, 1, start.Add(AttemptBackoffBase-time.Second)); d != admitSkip {
+		t.Fatal("a retry inside the backoff window must be skipped")
+	}
+	if _, d := r.beginAttempt(key, 1, start.Add(AttemptBackoffBase)); d != admitProceed {
+		t.Fatal("a retry once the backoff has elapsed must be admitted")
+	}
+}
+
+func TestIncident_BackoffIsExponential(t *testing.T) {
+	// 30s after the first attempt, 60s after the second — the values written
+	// into docs/measurement-definitions.md §5.
+	for completed, want := range map[int]time.Duration{1: 30 * time.Second, 2: 60 * time.Second} {
+		if got := attemptBackoff(completed); got != want {
+			t.Errorf("attemptBackoff(%d) = %v, want %v", completed, got, want)
+		}
+	}
+}
+
+func TestIncident_RecoveredEndsIncident_RolledBackDoesNot(t *testing.T) {
+	r := &PodReconciler{}
+	start := time.Now()
+
+	rolled := incidentKey("ns1", "rolled")
+	drive(r, rolled, 1, start, string(safety.OutcomeRolledBack))
+	if got := r.incidents[rolled].terminalOutcome; got != "" {
+		t.Errorf("a rolled_back attempt must leave the incident active to retry, got terminal %q", got)
+	}
+
+	recovered := incidentKey("ns1", "recovered")
+	drive(r, recovered, 1, start, OutcomeRecovered)
+	if got := r.incidents[recovered].terminalOutcome; got != OutcomeRecovered {
+		t.Errorf("terminal outcome = %q, want %q", got, OutcomeRecovered)
+	}
+}
+
+func TestIncident_ErroredAttemptRetriesRatherThanHangingTheGuard(t *testing.T) {
+	// Remediate() returning an error leaves the outcome empty. That must
+	// release the claim (otherwise the Deployment is blocked forever) without
+	// ending the incident (the attempt genuinely failed and should retry).
+	r := &PodReconciler{}
+	key := incidentKey("ns1", "dep1")
+	start := time.Now()
+
+	drive(r, key, 1, start, "")
+
+	record := r.incidents[key]
+	if record.inFlight {
+		t.Fatal("an errored attempt must release the in-flight claim")
+	}
+	if record.terminalOutcome != "" {
+		t.Fatalf("an errored attempt must not end the incident, got %q", record.terminalOutcome)
+	}
+	if _, d := r.beginAttempt(key, 1, start.Add(AttemptBackoffBase)); d != admitProceed {
+		t.Fatal("the next attempt must be admitted once the backoff has elapsed")
+	}
+}
+
+func TestIncident_CooldownExpiresForRecoveredButNeverForExhausted(t *testing.T) {
+	start := time.Now()
+
+	r := &PodReconciler{}
+	recovered := incidentKey("ns1", "recovered")
+	drive(r, recovered, 1, start, OutcomeRecovered)
+	if _, d := r.beginAttempt(recovered, 1, start.Add(CooldownPeriod-time.Second)); d != admitSkip {
+		t.Error("a recovered deployment must stay quiet for the cooldown")
+	}
+	if _, d := r.beginAttempt(recovered, 1, start.Add(CooldownPeriod)); d != admitProceed {
+		t.Error("once the cooldown elapses, a fresh crash loop starts a new incident")
+	}
+}
+
+func TestIncident_GenerationChangeClearsAnExhaustedIncident(t *testing.T) {
+	// A changed generation means a human or a new rollout intervened, so the
+	// thing we gave up on is no longer the thing running.
+	r := &PodReconciler{}
+	key := incidentKey("ns1", "dep1")
+	start := time.Now()
+
+	for i := 1; i <= MaxAttempts; i++ {
+		drive(r, key, 7, start.Add(time.Duration(i)*10*time.Minute), string(safety.OutcomeRolledBack))
+	}
+	if _, d := r.beginAttempt(key, 7, start.Add(time.Hour)); d != admitExhausted {
+		t.Fatal("setup: expected the budget to be spent")
+	}
+	if _, d := r.beginAttempt(key, 7, start.Add(2*time.Hour)); d != admitSkip {
+		t.Fatal("setup: expected exhausted to be sticky at the same generation")
+	}
+
+	_, decision := r.beginAttempt(key, 8, start.Add(2*time.Hour))
+	if decision != admitProceed {
+		t.Fatalf("a generation change must resurrect the deployment, got %v", decision)
+	}
+	if got := r.incidents[key].attemptCount; got != 0 {
+		t.Errorf("the new incident must start with a fresh budget, got attemptCount %d", got)
+	}
+}
+
+func TestIncident_EscalationConsumesNoAttemptBudget(t *testing.T) {
+	// escalated and rejected are terminal at attempt 0 — no snapshot is taken
+	// and no action runs, so they must not spend budget
+	// (docs/measurement-definitions.md §2).
+	r := &PodReconciler{}
+	key := incidentKey("ns1", "dep1")
+	now := time.Now()
+
+	if _, d := r.beginAttempt(key, 1, now); d != admitProceed {
+		t.Fatal("setup: expected a fresh incident to be admitted")
+	}
+	r.endAttempt(key, OutcomeEscalated, now)
+
+	record := r.incidents[key]
+	if record.attemptCount != 0 {
+		t.Errorf("attemptCount = %d, want 0 — recordAttempt is only called once an action is dispatched", record.attemptCount)
+	}
+	if record.terminalOutcome != OutcomeEscalated {
+		t.Errorf("terminal outcome = %q, want %q", record.terminalOutcome, OutcomeEscalated)
+	}
+}
+
+func TestIncident_KeyedByNamespaceAndDeployment_NotPodUID(t *testing.T) {
+	// The locked design explicitly rejects a UID-keyed record: RestartPod
 	// deletes the pod and the ReplicaSet controller recreates it with a new
 	// UID, so a UID key would fail to recognize the replacement re-crashing
-	// as the same remediation. This test pins the key format itself rather
-	// than any pod identity.
-	if got, want := inFlightKey("ns", "dep"), "ns/dep"; got != want {
-		t.Errorf("inFlightKey(%q, %q) = %q, want %q", "ns", "dep", got, want)
+	// as the same incident. This pins the key format itself.
+	if got, want := incidentKey("ns", "dep"), "ns/dep"; got != want {
+		t.Errorf("incidentKey(%q, %q) = %q, want %q", "ns", "dep", got, want)
+	}
+}
+
+func TestIncident_DistinctDeploymentsDoNotBlockEachOther(t *testing.T) {
+	r := &PodReconciler{}
+	now := time.Now()
+
+	if _, d := r.beginAttempt(incidentKey("ns1", "dep1"), 1, now); d != admitProceed {
+		t.Fatal("first deployment must be admitted")
+	}
+	if _, d := r.beginAttempt(incidentKey("ns1", "dep2"), 1, now); d != admitProceed {
+		t.Fatal("an unrelated deployment must not be blocked by another's in-flight attempt")
+	}
+	if _, d := r.beginAttempt(incidentKey("ns1", "dep1"), 1, now); d != admitSkip {
+		t.Fatal("the same deployment must be blocked while its attempt is in flight")
+	}
+}
+
+// --- frozen evidence (Week 3 Task 3) -------------------------------------
+
+func TestIncident_EvidenceIsCollectedOncePerIncident(t *testing.T) {
+	// Attempt 2 must be classified against the evidence captured at detection,
+	// not against evidence re-collected after attempt 1 — by then the 25-event
+	// window is full of the fallout from our own remediation and the original
+	// cause has been pushed out of it.
+	deploy, rs, pod := ownedPod(crashingContainerStatus("main", 3))
+	fetcher := &stubLogFetcher{previous: "freshly collected"}
+	spy := &capturingClassifier{outcome: classifier.ClassificationOutcome{Proposal: escalateProposal()}}
+	r := &PodReconciler{
+		Client:     fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(deploy, rs, pod).Build(),
+		Classifier: spy,
+		Evidence:   collectorWith(fetcher, nil),
+	}
+
+	// Stand in for attempt 1 having already run and rolled back: the bundle is
+	// frozen, the claim released, and the incident still active. attemptCount
+	// stays 0 because no action was dispatched, so no backoff applies.
+	key := incidentKey(testNamespace, testDeploymentName)
+	if _, decision := r.beginAttempt(key, 1, time.Now()); decision != admitProceed {
+		t.Fatalf("setup: expected a fresh incident to be admitted, got %v", decision)
+	}
+	r.freezeEvidence(key, "the original crash log", []string{"the original event"})
+	r.endAttempt(key, string(safety.OutcomeRolledBack), time.Now())
+
+	ctx, _ := newTestContext()
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: testNamespace, Name: testPodName}}); err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+
+	if len(fetcher.calls) != 0 {
+		t.Errorf("evidence was re-collected on a later attempt (%d log reads); it must be frozen at detection", len(fetcher.calls))
+	}
+	if got := spy.captured(); got.Logs != "the original crash log" {
+		t.Errorf("classifier received Logs = %q, want the frozen bundle", got.Logs)
+	}
+}
+
+func TestIncident_EvidenceIsCapturedOnTheFirstAttempt(t *testing.T) {
+	deploy, rs, pod := ownedPod(crashingContainerStatus("main", 3))
+	r := &PodReconciler{
+		Client:     fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(deploy, rs, pod).Build(),
+		Classifier: &capturingClassifier{outcome: classifier.ClassificationOutcome{Proposal: escalateProposal()}},
+		Evidence:   collectorWith(&stubLogFetcher{previous: "connection refused"}, nil),
+	}
+	ctx, _ := newTestContext()
+
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: testNamespace, Name: testPodName}}); err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+
+	logs, _, frozen := r.incidentEvidence(incidentKey(testNamespace, testDeploymentName))
+	if !frozen {
+		t.Fatal("the first attempt must freeze its evidence bundle onto the incident")
+	}
+	if logs != "connection refused" {
+		t.Errorf("frozen logs = %q, want the collected crash log", logs)
+	}
+}
+
+func TestIncident_FrozenEvidenceCannotBeMutatedByACaller(t *testing.T) {
+	r := &PodReconciler{}
+	key := incidentKey("ns1", "dep1")
+	r.beginAttempt(key, 1, time.Now())
+
+	original := []string{"cause"}
+	r.freezeEvidence(key, "log", original)
+	original[0] = "mutated by the producer"
+
+	_, events, _ := r.incidentEvidence(key)
+	events[0] = "mutated by the consumer"
+
+	_, again, _ := r.incidentEvidence(key)
+	if again[0] != "cause" {
+		t.Errorf("frozen events = %q; the bundle every later attempt is classified against must be isolated from both sides", again[0])
+	}
+}
+
+func TestIncident_NewIncidentCollectsFreshEvidence(t *testing.T) {
+	// The bundle lives on the record, so a generation change — which drops the
+	// record — must also drop the frozen evidence. Otherwise a Deployment that
+	// a human has since fixed is classified against the old fault.
+	r := &PodReconciler{}
+	key := incidentKey("ns1", "dep1")
+	start := time.Now()
+
+	for i := 1; i <= MaxAttempts; i++ {
+		drive(r, key, 7, start.Add(time.Duration(i)*10*time.Minute), string(safety.OutcomeRolledBack))
+	}
+	r.freezeEvidence(key, "stale cause", nil)
+	r.beginAttempt(key, 7, start.Add(time.Hour)) // exhausts the budget
+
+	if _, decision := r.beginAttempt(key, 8, start.Add(2*time.Hour)); decision != admitProceed {
+		t.Fatalf("setup: a generation change must start a new incident, got %v", decision)
+	}
+	if _, _, frozen := r.incidentEvidence(key); frozen {
+		t.Error("a new incident must collect fresh evidence, not inherit the previous incident's bundle")
 	}
 }
