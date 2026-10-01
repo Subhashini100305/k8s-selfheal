@@ -13,7 +13,7 @@ type AuditRecord struct {
 
 	// Week 3 experiment dimensions.
 	// Workload: W1, W2, W3.
-	// ExperimentArm: controller_enabled or controller_disabled.
+	// ExperimentArm: enabled or disabled.
 	AttemptNumber   int    `json:"attempt_number,omitempty"`
 	Workload        string `json:"workload,omitempty"`
 	ExperimentArm   string `json:"experiment_arm"`
@@ -37,7 +37,8 @@ type AuditRecord struct {
 	ClassifierModel           string  `json:"classifier_model"`
 	ClassifierDurationSeconds float64 `json:"classifier_duration_seconds"`
 
-	ActionStartedAt time.Time `json:"action_started_at"`
+	ActionStartedAt   time.Time `json:"action_started_at"`
+	ActionCompletedAt time.Time `json:"action_completed_at"`
 
 	VerificationStartedAt   time.Time `json:"verification_started_at"`
 	VerificationCompletedAt time.Time `json:"verification_completed_at"`

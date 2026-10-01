@@ -11,17 +11,18 @@ var terminalOutcomes = map[string]bool{
 }
 
 type incidentAggregate struct {
-	id              string
-	workload        string
-	arm             string
-	injectedAt      time.Time
-	detectedAt      time.Time
-	terminalAt      time.Time
-	terminalOutcome string
-	attempts        int
-	rollback        bool
-	legacySuccess   bool
-	hasWeek3Outcome bool
+	id               string
+	workload         string
+	arm              string
+	injectedAt       time.Time
+	detectedAt       time.Time
+	terminalAt       time.Time
+	terminalOutcome  string
+	attempts         int
+	rollback         bool
+	rollbackAttempts int
+	legacySuccess    bool
+	hasWeek3Outcome  bool
 }
 
 // Calculate calculates runtime metrics from audit records.
@@ -76,8 +77,9 @@ func Calculate(records []AuditRecord) Summary {
 			inc.attempts++
 			summary.RemediationAttempts++
 		}
-		if record.RolledBack {
+		if record.RemediationAttempt && record.RolledBack {
 			inc.rollback = true
+			inc.rollbackAttempts++
 			summary.TotalRollbacks++
 		}
 		if record.Success {
@@ -94,8 +96,8 @@ func Calculate(records []AuditRecord) Summary {
 			totalInference += record.ClassifierCompletedAt.Sub(record.ClassifierStartedAt)
 			validInference++
 		}
-		if validDuration(record.ClassifierCompletedAt, record.ActionStartedAt) {
-			totalApply += record.ActionStartedAt.Sub(record.ClassifierCompletedAt)
+		if validDuration(record.ActionStartedAt, record.ActionCompletedAt) {
+			totalApply += record.ActionCompletedAt.Sub(record.ActionStartedAt)
 			validApply++
 		}
 		if validDuration(record.VerificationStartedAt, record.VerificationCompletedAt) {
@@ -148,6 +150,7 @@ func Calculate(records []AuditRecord) Summary {
 	var totalTTD, totalTTM time.Duration
 	var validTTD, validTTM int
 	var incidentRollbackCount int
+	var actionableIncidentCount int
 
 	for _, inc := range incidents {
 		if validDuration(inc.injectedAt, inc.detectedAt) {
@@ -189,8 +192,12 @@ func Calculate(records []AuditRecord) Summary {
 				totalTTM += inc.terminalAt.Sub(inc.detectedAt)
 				validTTM++
 			}
-			if inc.rollback {
-				incidentRollbackCount++
+			if inc.terminalOutcome != "escalated" &&
+				inc.terminalOutcome != "rejected" {
+				actionableIncidentCount++
+				if inc.rollback {
+					incidentRollbackCount++
+				}
 			}
 		} else {
 			summary.IncompleteIncidents++
@@ -210,8 +217,10 @@ func Calculate(records []AuditRecord) Summary {
 	if summary.TerminalIncidents > 0 {
 		summary.RecoverySuccessRate =
 			float64(summary.SuccessfulRecoveries) / float64(summary.TerminalIncidents) * 100
+	}
+	if actionableIncidentCount > 0 {
 		summary.IncidentRollbackRate =
-			float64(incidentRollbackCount) / float64(summary.TerminalIncidents) * 100
+			float64(incidentRollbackCount) / float64(actionableIncidentCount) * 100
 	}
 	if summary.RemediationAttempts > 0 {
 		summary.RollbackRate =
@@ -299,21 +308,21 @@ func updateWorkloadSummary(summary *Summary, inc *incidentAggregate, terminal bo
 	var target *WorkloadArmSummary
 	switch inc.workload {
 	case "W1", "w1":
-		if inc.arm == "controller_enabled" {
+		if inc.arm == "enabled" {
 			target = &summary.W1.Enabled
-		} else if inc.arm == "controller_disabled" {
+		} else if inc.arm == "disabled" {
 			target = &summary.W1.Disabled
 		}
 	case "W2", "w2":
-		if inc.arm == "controller_enabled" {
+		if inc.arm == "enabled" {
 			target = &summary.W2.Enabled
-		} else if inc.arm == "controller_disabled" {
+		} else if inc.arm == "disabled" {
 			target = &summary.W2.Disabled
 		}
 	case "W3", "w3":
-		if inc.arm == "controller_enabled" {
+		if inc.arm == "enabled" {
 			target = &summary.W3.Enabled
-		} else if inc.arm == "controller_disabled" {
+		} else if inc.arm == "disabled" {
 			target = &summary.W3.Disabled
 		}
 	}
@@ -323,9 +332,7 @@ func updateWorkloadSummary(summary *Summary, inc *incidentAggregate, terminal bo
 
 	target.TotalIncidents++
 	target.RemediationAttempts += inc.attempts
-	if inc.rollback {
-		target.RollbackTriggers++
-	}
+	target.RollbackTriggers += inc.rollbackAttempts
 	if terminal {
 		target.TerminalIncidents++
 		if inc.terminalOutcome == "recovered" {

@@ -20,6 +20,7 @@ func TestCalculateWeek3MultiAttemptIncident(t *testing.T) {
 			IncidentID: "w3-1", AttemptNumber: 2, Workload: "W3",
 			ExperimentArm: "controller_enabled", RemediationAttempt: true,
 			InjectedAt: base, DetectedAt: base.Add(5 * time.Second),
+			RolledBack: true,
 		},
 		{
 			IncidentID: "w3-1", AttemptNumber: 3, Workload: "W3",
@@ -39,8 +40,8 @@ func TestCalculateWeek3MultiAttemptIncident(t *testing.T) {
 	if got.OutcomeDistribution["exhausted"] != 1 {
 		t.Fatalf("expected exhausted=1, got %d", got.OutcomeDistribution["exhausted"])
 	}
-	if math.Abs(got.RollbackRate-33.3333) > 0.01 {
-		t.Fatalf("expected attempt rollback rate 33.33, got %.2f", got.RollbackRate)
+	if math.Abs(got.RollbackRate-66.6667) > 0.01 {
+		t.Fatalf("expected attempt rollback rate 66.67, got %.2f", got.RollbackRate)
 	}
 	if got.IncidentRollbackRate != 100 {
 		t.Fatalf("expected incident rollback rate 100, got %.2f", got.IncidentRollbackRate)
@@ -66,16 +67,60 @@ func TestCalculateWeek3IncompleteIncident(t *testing.T) {
 	}
 }
 
+func TestCalculateWeek3IncidentRollbackDenominatorExcludesEscalatedAndRejected(t *testing.T) {
+	base := time.Date(2026, time.September, 29, 10, 0, 0, 0, time.UTC)
+
+	got := Calculate([]AuditRecord{
+		{
+			IncidentID: "rolled", Workload: "W1", ExperimentArm: "enabled",
+			AttemptNumber: 1, RemediationAttempt: true, RolledBack: true,
+			DetectedAt: base, TerminalAt: base.Add(30 * time.Second),
+			TerminalOutcome: "exhausted",
+		},
+		{
+			IncidentID: "no-rollback", Workload: "W1", ExperimentArm: "enabled",
+			AttemptNumber: 1, RemediationAttempt: true,
+			DetectedAt: base, TerminalAt: base.Add(30 * time.Second),
+			TerminalOutcome: "recovered",
+		},
+		{
+			IncidentID: "escalated", Workload: "W1", ExperimentArm: "enabled",
+			AttemptNumber: 0, RemediationAttempt: false,
+			DetectedAt: base, TerminalAt: base.Add(30 * time.Second),
+			TerminalOutcome: "escalated",
+		},
+		{
+			IncidentID: "rejected", Workload: "W1", ExperimentArm: "enabled",
+			AttemptNumber: 0, RemediationAttempt: false,
+			DetectedAt: base, TerminalAt: base.Add(30 * time.Second),
+			TerminalOutcome: "rejected",
+		},
+	})
+
+	if got.RemediationAttempts != 2 {
+		t.Fatalf("expected only 2 remediation attempts, got %d", got.RemediationAttempts)
+	}
+	if got.TotalRollbacks != 1 {
+		t.Fatalf("expected 1 rolled-back attempt, got %d", got.TotalRollbacks)
+	}
+	if got.RollbackRate != 50 {
+		t.Fatalf("expected attempt rollback rate 50, got %.2f", got.RollbackRate)
+	}
+	if got.IncidentRollbackRate != 50 {
+		t.Fatalf("expected incident rollback rate 50, got %.2f", got.IncidentRollbackRate)
+	}
+}
+
 func TestCalculateWeek3WorkloadAttribution(t *testing.T) {
 	base := time.Date(2026, time.September, 29, 10, 0, 0, 0, time.UTC)
 	records := []AuditRecord{
 		{
-			IncidentID: "enabled", Workload: "W2", ExperimentArm: "controller_enabled",
+			IncidentID: "enabled", Workload: "W2", ExperimentArm: "enabled",
 			DetectedAt: base, TerminalAt: base.Add(60 * time.Second),
 			TerminalOutcome: "recovered",
 		},
 		{
-			IncidentID: "disabled", Workload: "W2", ExperimentArm: "controller_disabled",
+			IncidentID: "disabled", Workload: "W2", ExperimentArm: "disabled",
 			DetectedAt: base, TerminalAt: base.Add(60 * time.Second),
 			TerminalOutcome: "exhausted",
 		},
@@ -87,6 +132,48 @@ func TestCalculateWeek3WorkloadAttribution(t *testing.T) {
 	}
 	if got.W2.AttributableRecovery != 100 {
 		t.Fatalf("expected attributable recovery 100pp, got %.2f", got.W2.AttributableRecovery)
+	}
+}
+
+func TestCalculateWeek3WorkloadRollbackTriggersCountAttempts(t *testing.T) {
+	base := time.Date(2026, time.September, 29, 10, 0, 0, 0, time.UTC)
+
+	got := Calculate([]AuditRecord{
+		{
+			IncidentID: "w1-rollback", AttemptNumber: 1, Workload: "W1",
+			ExperimentArm: "enabled", RemediationAttempt: true,
+			DetectedAt: base, RolledBack: true,
+		},
+		{
+			IncidentID: "w1-rollback", AttemptNumber: 2, Workload: "W1",
+			ExperimentArm: "enabled", RemediationAttempt: true,
+			DetectedAt: base, RolledBack: true,
+		},
+		{
+			IncidentID: "w1-rollback", AttemptNumber: 3, Workload: "W1",
+			ExperimentArm: "enabled", RemediationAttempt: true,
+			DetectedAt: base, TerminalAt: base.Add(90 * time.Second),
+			TerminalOutcome: "exhausted",
+		},
+	})
+
+	if got.W1.Enabled.RemediationAttempts != 3 {
+		t.Fatalf(
+			"expected 3 W1 enabled attempts, got %d",
+			got.W1.Enabled.RemediationAttempts,
+		)
+	}
+	if got.W1.Enabled.RollbackTriggers != 2 {
+		t.Fatalf(
+			"expected 2 W1 enabled rollback triggers, got %d",
+			got.W1.Enabled.RollbackTriggers,
+		)
+	}
+	if math.Abs(got.W1.Enabled.RollbackTriggerRate-66.6667) > 0.01 {
+		t.Fatalf(
+			"expected W1 enabled rollback trigger rate 66.67, got %.2f",
+			got.W1.Enabled.RollbackTriggerRate,
+		)
 	}
 }
 
