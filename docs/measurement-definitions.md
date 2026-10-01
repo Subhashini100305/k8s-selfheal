@@ -1,0 +1,135 @@
+# Measurement definitions
+
+Frozen on 2026-10-01, before any experiment run. **These cannot change after
+runs begin** — every metric in the report depends on them, and a definition
+that shifts mid-experiment invalidates every number collected before the shift.
+
+Agreed by all three owners. Changing anything here requires re-running every
+arm already collected.
+
+## 1. Incident and attempt
+
+- **Incident** — one detection through to one terminal outcome. At most one
+  incident per Deployment at a time.
+- **Attempt** — one `snapshot → action → verify` cycle.
+- An incident contains 1..N attempts, N bounded by `MaxAttempts`.
+
+An incident is identified by `incidentID`, generated at detection. Attempts
+within it are numbered `attemptNumber`, starting at 1.
+
+## 2. Terminal outcomes
+
+Exactly five. Every incident ends in exactly one of these, and nothing else is
+a terminal state.
+
+| Outcome | Meaning |
+|---|---|
+| `recovered` | Verification passed — the pod became Ready and stayed Ready for the full stability window. |
+| `rolled_back` | Verification failed; the pre-action snapshot was restored. |
+| `exhausted` | The attempt budget was spent without recovery. |
+| `escalated` | The classifier returned `safe_for_automation: false`, or sub-cause `unknown`. No action was taken. |
+| `rejected` | The validator refused the proposed action — off-allowlist, malformed, or semantically unsupported. No action was taken. |
+
+`escalated` and `rejected` are terminal at attempt 0: no snapshot is taken and
+no action runs, so they consume no attempt budget.
+
+## 3. Rollback trigger rate
+
+Two formulas, both reported. The attempt-level rate is **primary**.
+
+```
+rollback_rate_attempts  = attempts ending in rolled_back / total attempts
+rollback_rate_incidents = incidents containing >= 1 rolled_back attempt / total incidents
+```
+
+Attempts is the primary denominator because it matches "rate over a population
+of remediation attempts". The incident-level figure is reported as secondary
+because an incident with three failed attempts is one incident but three
+rollbacks, and collapsing those hides the retry behaviour.
+
+Denominators exclude `escalated` and `rejected` incidents — no action was
+taken, so there was nothing to roll back.
+
+## 4. Timing
+
+```
+TTD = fault injection timestamp  -> DetectionEvent timestamp
+TTM = DetectionEvent timestamp   -> terminal outcome timestamp
+```
+
+TTM is reported decomposed into four stages per attempt, not as a single
+number:
+
+| Field | Span |
+|---|---|
+| `t_detect` | fault injection → DetectionEvent |
+| `t_classify` | classifier call duration (the LLM inference component) |
+| `t_apply` | action dispatch → action confirmed applied |
+| `t_verify` | verification window duration |
+
+`t_verify` is constant by design and is reported as such. **TTM has a hard
+~60s floor**, because the stability window is 60s by construction. This is a
+design property of the verification method, not a performance result, and the
+report states it before presenting any TTM figure.
+
+## 5. Attempt budget
+
+| Parameter | Value |
+|---|---|
+| `MaxAttempts` | 3 per incident |
+| Backoff between attempts | 30s after attempt 1, 60s after attempt 2 |
+| Cooldown after terminal outcome | 5 minutes per Deployment |
+
+After `MaxAttempts` is reached without recovery, the incident ends as
+`exhausted` and the controller stops acting on that Deployment.
+
+Cooldown suppresses re-detection of the same Deployment after any terminal
+outcome. It is **reset early if the Deployment's `metadata.generation`
+changes**, since a generation change means a human or a new rollout
+intervened and the situation is no longer the one we gave up on.
+
+## 6. Shared audit fields
+
+Every audit line carries these. Field names are frozen — the metrics module
+parses them positionally by name.
+
+| Field | Type | Written by |
+|---|---|---|
+| `incidentID` | string | operator |
+| `attemptNumber` | int | operator |
+| `timestamp` | RFC3339 | safety |
+| `state` | string | safety |
+| `action` | string | safety |
+| `result` | string | safety |
+| `workload` | string (`W1`/`W2`/`W3`) | run harness |
+| `armLabel` | string (`enabled`/`disabled`) | run harness |
+
+## 7. Experiment arms
+
+Three workloads × two conditions. The disabled arm is the null-action control:
+Kubernetes' own back-off can recover a crash loop unaided, so without it a
+recovery rate is not attributable to the controller.
+
+| Arm | Workload | Controller | N |
+|---|---|---|---|
+| A1 | W1 transient crasher | enabled | 5 |
+| A2 | W1 transient crasher | disabled | 5 |
+| B1 | W2 bad current revision | enabled | 5 |
+| B2 | W2 bad current revision | disabled | 5 |
+| C1 | W3 bad current and previous | enabled | 5 |
+| C2 | W3 bad current and previous | disabled | 3 |
+
+```
+attributable_recovery(workload) = recovery_rate(enabled) - recovery_rate(disabled)
+```
+
+C2 is N=3 rather than 5 because it is a sanity check on a baseline expected to
+be exactly zero, not a measurement.
+
+## Out of scope, stated
+
+- The verifier constants (30s readiness, 60s stability) were chosen a priori
+  and are **not tuned against data**. No paper in our corpus evaluates
+  stability-window sensitivity either.
+- N=5 per arm gives a direction, not a confidence interval. We report counts,
+  never a bare percentage.
