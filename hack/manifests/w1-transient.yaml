@@ -12,7 +12,14 @@
 #   emptyDir lives for the lifetime of the POD, on the node. A container
 #   *restart* inside the same pod keeps it, so the counter advances 1 -> 2 -> 3
 #   -> 4 across the kubelet's own restarts and the workload comes up healthy on
-#   its own after roughly 70s (the back-off schedule is 10s, 20s, 40s).
+#   its own. Measured on kind with the controller stopped: Ready after 36s and
+#   3 restarts.
+#
+#   36s matters, because the verifier's readiness timeout is 30s. The margin
+#   between "self-heals" and "self-heals inside our verification window" is
+#   about six seconds, so W1 sits close to the decision boundary and the
+#   enabled arm may not behave identically on every run. Report the spread
+#   across N=5 rather than a single observation.
 #
 #   Deleting the POD destroys it. A replacement pod gets a brand-new, empty
 #   emptyDir, so its counter starts again at 1.

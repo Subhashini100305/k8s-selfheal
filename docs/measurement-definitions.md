@@ -127,6 +127,31 @@ parses them positionally by name.
 | `workload` | string (`W1`/`W2`/`W3`) | run harness |
 | `armLabel` | string (`enabled`/`disabled`) | run harness |
 
+## 6a. Abandoned incidents
+
+A fifth shape exists that §2 does not cover, found in the first deployed W1
+run: an incident that records one or more attempts and then **never reaches a
+terminal outcome**, because the workload healed itself and the controller
+stopped seeing a crash loop.
+
+Observed: `restart_pod` fired, the attempt rolled back at the 30s readiness
+timeout, and the replacement pod self-healed about 18 seconds later. No second
+attempt was triggered because there was no longer anything to detect.
+
+How to count these:
+
+- The **attempt-level** record is complete and correct, so
+  `rollback_rate_attempts` — the primary metric — is unaffected.
+- The incident has no terminal outcome, so it is excluded from the
+  **incident-level** denominator and reported separately as `abandoned`, with
+  a count.
+- An abandoned incident is **not** a recovery by us. The recovery happened
+  unaided, after our attempt failed, which is exactly what the paired control
+  arm is there to reveal.
+
+This is expected to affect W1 only. W2 and W3 cannot self-heal, so every
+incident on them reaches a terminal outcome.
+
 ## 7. Experiment arms
 
 Three workloads × two conditions. The disabled arm is the null-action control:
