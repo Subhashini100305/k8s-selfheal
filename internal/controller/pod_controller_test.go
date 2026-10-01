@@ -17,6 +17,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	"github.com/aryausingh/k8s-selfheal/internal/classifier"
 	"github.com/aryausingh/k8s-selfheal/internal/contracts"
 	"github.com/aryausingh/k8s-selfheal/internal/safety"
 )
@@ -503,5 +504,106 @@ func TestIncident_DistinctDeploymentsDoNotBlockEachOther(t *testing.T) {
 	}
 	if _, d := r.beginAttempt(incidentKey("ns1", "dep1"), 1, now); d != admitSkip {
 		t.Fatal("the same deployment must be blocked while its attempt is in flight")
+	}
+}
+
+// --- frozen evidence (Week 3 Task 3) -------------------------------------
+
+func TestIncident_EvidenceIsCollectedOncePerIncident(t *testing.T) {
+	// Attempt 2 must be classified against the evidence captured at detection,
+	// not against evidence re-collected after attempt 1 — by then the 25-event
+	// window is full of the fallout from our own remediation and the original
+	// cause has been pushed out of it.
+	deploy, rs, pod := ownedPod(crashingContainerStatus("main", 3))
+	fetcher := &stubLogFetcher{previous: "freshly collected"}
+	spy := &capturingClassifier{outcome: classifier.ClassificationOutcome{Proposal: escalateProposal()}}
+	r := &PodReconciler{
+		Client:     fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(deploy, rs, pod).Build(),
+		Classifier: spy,
+		Evidence:   collectorWith(fetcher, nil),
+	}
+
+	// Stand in for attempt 1 having already run and rolled back: the bundle is
+	// frozen, the claim released, and the incident still active. attemptCount
+	// stays 0 because no action was dispatched, so no backoff applies.
+	key := incidentKey(testNamespace, testDeploymentName)
+	if _, decision := r.beginAttempt(key, 1, time.Now()); decision != admitProceed {
+		t.Fatalf("setup: expected a fresh incident to be admitted, got %v", decision)
+	}
+	r.freezeEvidence(key, "the original crash log", []string{"the original event"})
+	r.endAttempt(key, string(safety.OutcomeRolledBack), time.Now())
+
+	ctx, _ := newTestContext()
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: testNamespace, Name: testPodName}}); err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+
+	if len(fetcher.calls) != 0 {
+		t.Errorf("evidence was re-collected on a later attempt (%d log reads); it must be frozen at detection", len(fetcher.calls))
+	}
+	if got := spy.captured(); got.Logs != "the original crash log" {
+		t.Errorf("classifier received Logs = %q, want the frozen bundle", got.Logs)
+	}
+}
+
+func TestIncident_EvidenceIsCapturedOnTheFirstAttempt(t *testing.T) {
+	deploy, rs, pod := ownedPod(crashingContainerStatus("main", 3))
+	r := &PodReconciler{
+		Client:     fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(deploy, rs, pod).Build(),
+		Classifier: &capturingClassifier{outcome: classifier.ClassificationOutcome{Proposal: escalateProposal()}},
+		Evidence:   collectorWith(&stubLogFetcher{previous: "connection refused"}, nil),
+	}
+	ctx, _ := newTestContext()
+
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: testNamespace, Name: testPodName}}); err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+
+	logs, _, frozen := r.incidentEvidence(incidentKey(testNamespace, testDeploymentName))
+	if !frozen {
+		t.Fatal("the first attempt must freeze its evidence bundle onto the incident")
+	}
+	if logs != "connection refused" {
+		t.Errorf("frozen logs = %q, want the collected crash log", logs)
+	}
+}
+
+func TestIncident_FrozenEvidenceCannotBeMutatedByACaller(t *testing.T) {
+	r := &PodReconciler{}
+	key := incidentKey("ns1", "dep1")
+	r.beginAttempt(key, 1, time.Now())
+
+	original := []string{"cause"}
+	r.freezeEvidence(key, "log", original)
+	original[0] = "mutated by the producer"
+
+	_, events, _ := r.incidentEvidence(key)
+	events[0] = "mutated by the consumer"
+
+	_, again, _ := r.incidentEvidence(key)
+	if again[0] != "cause" {
+		t.Errorf("frozen events = %q; the bundle every later attempt is classified against must be isolated from both sides", again[0])
+	}
+}
+
+func TestIncident_NewIncidentCollectsFreshEvidence(t *testing.T) {
+	// The bundle lives on the record, so a generation change — which drops the
+	// record — must also drop the frozen evidence. Otherwise a Deployment that
+	// a human has since fixed is classified against the old fault.
+	r := &PodReconciler{}
+	key := incidentKey("ns1", "dep1")
+	start := time.Now()
+
+	for i := 1; i <= MaxAttempts; i++ {
+		drive(r, key, 7, start.Add(time.Duration(i)*10*time.Minute), string(safety.OutcomeRolledBack))
+	}
+	r.freezeEvidence(key, "stale cause", nil)
+	r.beginAttempt(key, 7, start.Add(time.Hour)) // exhausts the budget
+
+	if _, decision := r.beginAttempt(key, 8, start.Add(2*time.Hour)); decision != admitProceed {
+		t.Fatalf("setup: a generation change must start a new incident, got %v", decision)
+	}
+	if _, _, frozen := r.incidentEvidence(key); frozen {
+		t.Error("a new incident must collect fresh evidence, not inherit the previous incident's bundle")
 	}
 }

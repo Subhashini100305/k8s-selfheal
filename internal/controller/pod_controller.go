@@ -185,9 +185,17 @@ func (r *PodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 			// rejects every sub-cause but "unknown" and the incident
 			// escalates — the fail-safe direction — rather than the
 			// classifier guessing from a restart count alone.
-			logs, events := r.Evidence.Collect(ctx, &pod, event.ContainerName, event.OwnerDeployment)
+			// Collected once per incident, not once per attempt — see
+			// incidentEvidence in incident.go for why re-collecting poisons
+			// classification on retries, and what freezing costs.
+			logs, events, frozen := r.incidentEvidence(key)
+			if !frozen {
+				logs, events = r.Evidence.Collect(ctx, &pod, event.ContainerName, event.OwnerDeployment)
+				r.freezeEvidence(key, logs, events)
+			}
 			logger.Info("Collected incident evidence",
-				"pod", event.PodName, "logBytes", len(logs), "eventCount", len(events))
+				"pod", event.PodName, "logBytes", len(logs), "eventCount", len(events),
+				"incidentID", event.IncidentID, "reusedFrozenBundle", frozen)
 
 			incident := classifier.IncidentInput{
 				DetectionEvent: classifier.DetectionEvent{
