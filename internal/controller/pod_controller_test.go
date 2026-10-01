@@ -315,7 +315,7 @@ func drive(r *PodReconciler, key string, generation int64, now time.Time, outcom
 	if decision != admitProceed {
 		return decision, 0
 	}
-	attempt := r.recordAttempt(key, now)
+	attempt := r.recordAttempt(key)
 	r.endAttempt(key, outcome, now)
 	return decision, attempt
 }
@@ -619,7 +619,7 @@ func TestIncident_BackoffRunsFromAttemptEndNotAttemptStart(t *testing.T) {
 	finished := started.Add(30 * time.Second) // a realistic attempt duration
 
 	r.beginAttempt(key, 1, started)
-	r.recordAttempt(key, started)
+	r.recordAttempt(key)
 	r.endAttempt(key, string(safety.OutcomeRolledBack), finished)
 
 	// Measured from the start, 30s of backoff would already have elapsed here.

@@ -42,7 +42,7 @@ type incidentRecord struct {
 	attemptCount    int
 	firstDetectedAt time.Time
 	lastAttemptAt   time.Time // when the last attempt FINISHED — backoff counts from here
-	terminalOutcome string // empty while the incident is still active
+	terminalOutcome string    // empty while the incident is still active
 	terminalAt      time.Time
 	generation      int64 // Deployment metadata.generation last seen
 	inFlight        bool  // an attempt is running right now
@@ -140,7 +140,7 @@ func (r *PodReconciler) beginAttempt(key string, generation int64, now time.Time
 // about to be dispatched: an incident that escalates or is rejected takes no
 // action at all, so it must not consume budget (measurement-definitions.md §2
 // — those outcomes are terminal at attempt 0).
-func (r *PodReconciler) recordAttempt(key string, now time.Time) int {
+func (r *PodReconciler) recordAttempt(key string) int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	record := r.incidents[key]
