@@ -61,6 +61,11 @@ type PodReconciler struct {
 	Audit     safety.AuditWriter
 	Clock     safety.Clock
 
+	// AuditMetadata is supplied by the experiment harness configuration and
+	// copied onto every Owner 2 transition. The controller does not infer
+	// workload or arm labels from remediation behavior.
+	AuditMetadata safety.AuditMetadata
+
 	// incidents holds one remediation record per Deployment, keyed by
 	// "namespace/OwnerDeployment" — deliberately NOT pod UID. RestartPod
 	// deletes the crash-looping pod and the ReplicaSet controller creates a
@@ -252,6 +257,7 @@ func (r *PodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 				Action:    action,
 				Audit:     r.Audit,
 				Clock:     r.Clock,
+				Metadata:  r.AuditMetadata,
 			}
 
 			// Dispatched into a goroutine against ManagerCtx, not this
