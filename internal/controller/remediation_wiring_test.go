@@ -66,6 +66,13 @@ func (stubSnapshotStore) Restore(context.Context, safety.DeploymentSnapshot) err
 // finishes in-process rather than actually polling for 30-90s.
 type stubVerifier struct{ recovered bool }
 
+func (v stubVerifier) CapturePreActionPodUIDs(
+	context.Context,
+	safety.VerificationTarget,
+) (safety.PodUIDSet, error) {
+	return safety.PodUIDSet{types.UID("original-uid"): {}}, nil
+}
+
 func (v stubVerifier) Verify(context.Context, safety.VerificationTarget) (safety.VerificationResult, error) {
 	return safety.VerificationResult{Recovered: v.recovered}, nil
 }
@@ -80,6 +87,12 @@ func (w *stubAuditWriter) Append(entry safety.AuditEntry) error {
 	defer w.mu.Unlock()
 	w.entries = append(w.entries, entry)
 	return nil
+}
+
+func (w *stubAuditWriter) snapshot() []safety.AuditEntry {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return append([]safety.AuditEntry(nil), w.entries...)
 }
 
 // automateProposal builds a Proposal that passes Subhashini's validator for
@@ -186,15 +199,17 @@ func TestReconcile_Escalates_WhenNoMatchingActionRegistered(t *testing.T) {
 func TestReconcile_DispatchesRemediation_WhenSafeForAutomation(t *testing.T) {
 	deploy, rs, pod := ownedPod(crashingContainerStatus("main", 3))
 	action := &stubRemediationAction{name: classifier.ActionRestartPod, called: make(chan contracts.DetectionEvent, 1)}
+	audit := &stubAuditWriter{}
 	r := &PodReconciler{
-		Client:     fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(deploy, rs, pod).Build(),
-		ManagerCtx: context.Background(),
-		Classifier: stubIncidentClassifier{outcome: classifier.ClassificationOutcome{Proposal: automateProposal()}},
-		Actions:    map[string]safety.RemediationAction{classifier.ActionRestartPod: action},
-		Snapshots:  stubSnapshotStore{},
-		Verifier:   stubVerifier{recovered: true},
-		Audit:      &stubAuditWriter{},
-		Clock:      safety.RealClock{},
+		Client:        fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(deploy, rs, pod).Build(),
+		ManagerCtx:    context.Background(),
+		Classifier:    stubIncidentClassifier{outcome: classifier.ClassificationOutcome{Proposal: automateProposal()}},
+		Actions:       map[string]safety.RemediationAction{classifier.ActionRestartPod: action},
+		Snapshots:     stubSnapshotStore{},
+		Verifier:      stubVerifier{recovered: true},
+		Audit:         audit,
+		Clock:         safety.RealClock{},
+		AuditMetadata: safety.AuditMetadata{Workload: "W2", ArmLabel: "enabled"},
 	}
 	ctx, sink := newTestContext()
 
@@ -217,6 +232,11 @@ func TestReconcile_DispatchesRemediation_WhenSafeForAutomation(t *testing.T) {
 	}
 
 	waitForGuardCleared(t, r)
+	for _, entry := range audit.snapshot() {
+		if entry.Workload != "W2" || entry.ArmLabel != "enabled" {
+			t.Fatalf("audit metadata = %q/%q, want W2/enabled", entry.Workload, entry.ArmLabel)
+		}
+	}
 	if sink.has(escalatedMsg) {
 		t.Error("a safe-for-automation proposal must not be escalated")
 	}
