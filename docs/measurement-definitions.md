@@ -77,11 +77,24 @@ report states it before presenting any TTM figure.
 | Parameter | Value |
 |---|---|
 | `MaxAttempts` | 3 per incident |
-| Backoff between attempts | 30s after attempt 1, 60s after attempt 2 |
+| Backoff between attempts | 30s after attempt 1, 60s after attempt 2 — measured from when the previous attempt **finished** |
 | Cooldown after terminal outcome | 5 minutes per Deployment |
 
 After `MaxAttempts` is reached without recovery, the incident ends as
 `exhausted` and the controller stops acting on that Deployment.
+
+Backoff runs from the **end** of the previous attempt, not its start. An
+attempt occupies roughly 30s of wall clock on a workload that never becomes
+Ready (the verifier's readiness timeout), so measuring from the start would let
+that duration consume the backoff — the first deployed run produced a 12s gap
+between attempts where this table promises 30s. With one incident spanning at
+most three attempts, expect it to reach `exhausted` about 3.5 minutes after
+detection.
+
+The backoff is a floor, not an exact interval. A new attempt can only begin on
+the next reconcile, and reconciles fire when the Pod's status changes — on the
+kubelet's own crash-loop schedule. Measured on W3 in deployed mode, the gaps
+between attempts were 40s and 91s against promised minima of 30s and 60s.
 
 Cooldown suppresses re-detection of the same Deployment after `recovered`,
 `escalated` or `rejected`. It is **reset early if the Deployment's
@@ -113,6 +126,31 @@ parses them positionally by name.
 | `result` | string | safety |
 | `workload` | string (`W1`/`W2`/`W3`) | run harness |
 | `armLabel` | string (`enabled`/`disabled`) | run harness |
+
+## 6a. Abandoned incidents
+
+A fifth shape exists that §2 does not cover, found in the first deployed W1
+run: an incident that records one or more attempts and then **never reaches a
+terminal outcome**, because the workload healed itself and the controller
+stopped seeing a crash loop.
+
+Observed: `restart_pod` fired, the attempt rolled back at the 30s readiness
+timeout, and the replacement pod self-healed about 18 seconds later. No second
+attempt was triggered because there was no longer anything to detect.
+
+How to count these:
+
+- The **attempt-level** record is complete and correct, so
+  `rollback_rate_attempts` — the primary metric — is unaffected.
+- The incident has no terminal outcome, so it is excluded from the
+  **incident-level** denominator and reported separately as `abandoned`, with
+  a count.
+- An abandoned incident is **not** a recovery by us. The recovery happened
+  unaided, after our attempt failed, which is exactly what the paired control
+  arm is there to reveal.
+
+This is expected to affect W1 only. W2 and W3 cannot self-heal, so every
+incident on them reaches a terminal outcome.
 
 ## 7. Experiment arms
 

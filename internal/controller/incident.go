@@ -41,8 +41,8 @@ type incidentRecord struct {
 	id              string
 	attemptCount    int
 	firstDetectedAt time.Time
-	lastAttemptAt   time.Time
-	terminalOutcome string // empty while the incident is still active
+	lastAttemptAt   time.Time // when the last attempt FINISHED — backoff counts from here
+	terminalOutcome string    // empty while the incident is still active
 	terminalAt      time.Time
 	generation      int64 // Deployment metadata.generation last seen
 	inFlight        bool  // an attempt is running right now
@@ -91,6 +91,16 @@ func (r *PodReconciler) beginAttempt(key string, generation int64, now time.Time
 	// rollout landed, so whatever we concluded about the old spec no longer
 	// applies. Drop the record entirely and start fresh — this is the only
 	// thing that clears an exhausted incident.
+	//
+	// Our own remediation also moves the generation: rollout_undo rewrites
+	// the pod template and the snapshot restore rewrites it back, so a
+	// three-attempt incident bumps it six times (observed: 2 -> 8 on W3).
+	// That does not resurrect the incident, for two reasons that have to hold
+	// together. The comparison runs only once the incident is already
+	// terminal, and the stored generation is refreshed on every admitted
+	// attempt — so at the moment we go terminal it equals whatever our last
+	// action left behind. From then on we take no actions at all, so nothing
+	// but an external change can move it again.
 	if record != nil && record.terminalOutcome != "" && generation != record.generation {
 		delete(r.incidents, key)
 		record = nil
@@ -140,7 +150,7 @@ func (r *PodReconciler) beginAttempt(key string, generation int64, now time.Time
 // about to be dispatched: an incident that escalates or is rejected takes no
 // action at all, so it must not consume budget (measurement-definitions.md §2
 // — those outcomes are terminal at attempt 0).
-func (r *PodReconciler) recordAttempt(key string, now time.Time) int {
+func (r *PodReconciler) recordAttempt(key string) int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	record := r.incidents[key]
@@ -148,7 +158,8 @@ func (r *PodReconciler) recordAttempt(key string, now time.Time) int {
 		return 0
 	}
 	record.attemptCount++
-	record.lastAttemptAt = now
+	// lastAttemptAt is deliberately not set here. Backoff runs from when an
+	// attempt finishes, not when it starts — see endAttempt.
 	return record.attemptCount
 }
 
@@ -168,15 +179,24 @@ func (r *PodReconciler) endAttempt(key, outcome string, now time.Time) {
 	}
 	record.inFlight = false
 	if outcome == "" || outcome == string(safety.OutcomeRolledBack) {
+		// Backoff is measured from here, the moment the attempt finished,
+		// rather than from when it started. An attempt takes about 30s of
+		// wall clock (the verifier's readiness timeout) and measuring from
+		// its start lets that duration eat the backoff: the first deployed
+		// run showed a 12s gap between attempts where the definitions
+		// document promises 30s. "30s after attempt 1" means after it
+		// completes.
+		record.lastAttemptAt = now
 		return
 	}
 	record.terminalOutcome = outcome
 	record.terminalAt = now
 }
 
-// attemptBackoff is how long to wait before the next attempt, given how many
-// have already completed: 30s after the first, 60s after the second. The shift
-// is bounded because MaxAttempts caps the input.
+// attemptBackoff is how long to wait after an attempt finishes before the next
+// one may start, given how many have already completed: 30s after the first,
+// 60s after the second. The shift is bounded because MaxAttempts caps the
+// input.
 func attemptBackoff(completedAttempts int) time.Duration {
 	return AttemptBackoffBase << (completedAttempts - 1)
 }

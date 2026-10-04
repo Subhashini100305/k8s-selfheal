@@ -244,7 +244,7 @@ func (r *PodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 				break
 			}
 
-			event.AttemptNumber = r.recordAttempt(key, time.Now())
+			event.AttemptNumber = r.recordAttempt(key)
 
 			service := &safety.Service{
 				Snapshots: r.Snapshots,

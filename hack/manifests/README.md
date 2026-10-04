@@ -211,7 +211,7 @@ rename them.
 
 | ID | Manifest | What it is | Without controller | With controller |
 |---|---|---|---|---|
-| **W1** | `w1-transient.yaml` | Transient crasher, self-recovers after 3 failed starts | **Recovers unaided** in ~70s | `restart_pod` resets the counter → verification fails → `rolled_back`, then `exhausted` |
+| **W1** | `w1-transient.yaml` | Transient crasher, self-recovers after 3 failed starts | **Recovers unaided** in ~36s (measured) | `restart_pod` resets the counter → attempt `rolled_back`; the replacement then self-heals, so the incident is usually *abandoned* rather than reaching `exhausted` |
 | **W2** | `rollout-fixable.yaml` | Bad current revision, good previous | Never recovers | `rollout_undo` → `recovered` |
 | **W3** | `rollout-unrecoverable.yaml` | Bad current **and** previous revision | Never recovers | Fix applied → verification fails → `rolled_back` ×3 → `exhausted` |
 
@@ -243,7 +243,25 @@ times from scratch. Two consequences:
    verification fails and the attempt is recorded `rolled_back`.
 
 So arm A1 (enabled) should look *worse* than A2 (disabled), and attributable
-recovery for W1 should come out **negative**. That is a real result about the
+recovery for W1 should come out **negative**.
+
+### Measured, deployed mode, one run each
+
+| Arm | Observed |
+|---|---|
+| Control (controller off) | Ready after **36s**, 3 restarts, reached `start 4` unaided |
+| Enabled | Detected at +14s, `restart_pod`, attempt 1 → `rolled_back` at +44s (*pod did not become Ready before initial readiness timeout*). The replacement then self-healed at about +62s, so no second attempt was ever triggered. |
+
+**The incident never reached a terminal outcome.** One attempt was recorded,
+it rolled back, and then the workload healed itself — so the controller simply
+stopped seeing a crash loop and the incident was abandoned mid-flight with
+`terminalOutcome` unset. The attempt-level record is complete and correct; the
+incident-level one is missing. See the note in
+`docs/measurement-definitions.md` on how to count these.
+
+Note also that 36s unaided against a 30s readiness timeout is a ~6s margin, so
+W1 sits close to the decision boundary. Do not assume all five runs of A1 will
+look the same — report the spread. That is a real result about the
 limits of a blunt remediation action, it is why the paired control arm exists
 at all, and it belongs in the report as a finding. Record it; do not retune the
 workload to make the controller look better.
