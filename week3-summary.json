@@ -1,0 +1,181 @@
+{
+  "total_incidents": 15,
+  "terminal_incidents": 10,
+  "incomplete_incidents": 5,
+  "abandoned_incidents": 5,
+  "successful_recoveries": 5,
+  "failed_recoveries": 5,
+  "total_rollbacks": 20,
+  "remediation_attempts": 25,
+  "average_ttd_seconds": 14.2608834842,
+  "average_ttm_seconds": 147.1448679232,
+  "average_inference_latency_seconds": 0,
+  "average_apply_seconds": 0.00898166232,
+  "average_verification_seconds": 36.206473798880005,
+  "average_cluster_convergence_seconds": 36.2154554612,
+  "recovery_success_rate": 50,
+  "rollback_rate": 80,
+  "incident_rollback_rate": 50,
+  "outcome_distribution": {
+    "escalated": 0,
+    "exhausted": 5,
+    "recovered": 5,
+    "rejected": 0,
+    "rolled_back": 0
+  },
+  "controller_enabled": {
+    "total_incidents": 0,
+    "successful_recoveries": 0,
+    "failed_recoveries": 0,
+    "remediation_attempts": 0,
+    "rollback_triggers": 0,
+    "recovery_success_rate": 0,
+    "rollback_trigger_rate": 0
+  },
+  "controller_disabled": {
+    "total_incidents": 0,
+    "successful_recoveries": 0,
+    "failed_recoveries": 0,
+    "remediation_attempts": 0,
+    "rollback_triggers": 0,
+    "recovery_success_rate": 0,
+    "rollback_trigger_rate": 0
+  },
+  "unrecoverable": {
+    "total_incidents": 0,
+    "successful_recoveries": 0,
+    "failed_recoveries": 0,
+    "remediation_attempts": 0,
+    "rollback_triggers": 0,
+    "recovery_success_rate": 0,
+    "rollback_trigger_rate": 0
+  },
+  "w1": {
+    "enabled": {
+      "total_incidents": 5,
+      "terminal_incidents": 0,
+      "incomplete_incidents": 5,
+      "recovered_incidents": 0,
+      "recovery_rate": 0,
+      "remediation_attempts": 5,
+      "rollback_triggers": 5,
+      "rollback_trigger_rate": 100
+    },
+    "disabled": {
+      "total_incidents": 0,
+      "terminal_incidents": 0,
+      "incomplete_incidents": 0,
+      "recovered_incidents": 0,
+      "recovery_rate": 0,
+      "remediation_attempts": 0,
+      "rollback_triggers": 0,
+      "rollback_trigger_rate": 0
+    },
+    "attributable_recovery_percentage_points": 0
+  },
+  "w2": {
+    "enabled": {
+      "total_incidents": 5,
+      "terminal_incidents": 5,
+      "incomplete_incidents": 0,
+      "recovered_incidents": 5,
+      "recovery_rate": 100,
+      "remediation_attempts": 5,
+      "rollback_triggers": 0,
+      "rollback_trigger_rate": 0
+    },
+    "disabled": {
+      "total_incidents": 0,
+      "terminal_incidents": 0,
+      "incomplete_incidents": 0,
+      "recovered_incidents": 0,
+      "recovery_rate": 0,
+      "remediation_attempts": 0,
+      "rollback_triggers": 0,
+      "rollback_trigger_rate": 0
+    },
+    "attributable_recovery_percentage_points": 100
+  },
+  "w3": {
+    "enabled": {
+      "total_incidents": 5,
+      "terminal_incidents": 5,
+      "incomplete_incidents": 0,
+      "recovered_incidents": 0,
+      "recovery_rate": 0,
+      "remediation_attempts": 15,
+      "rollback_triggers": 15,
+      "rollback_trigger_rate": 100
+    },
+    "disabled": {
+      "total_incidents": 0,
+      "terminal_incidents": 0,
+      "incomplete_incidents": 0,
+      "recovered_incidents": 0,
+      "recovery_rate": 0,
+      "remediation_attempts": 0,
+      "rollback_triggers": 0,
+      "rollback_trigger_rate": 0
+    },
+    "attributable_recovery_percentage_points": 0
+  },
+  "experiment_recovery": {
+    "valid_runs": 28,
+    "invalid_runs": 0,
+    "w1": {
+      "enabled": {
+        "runs": 5,
+        "invalid_runs": 0,
+        "recovered_runs": 5,
+        "recovery_rate": 100
+      },
+      "disabled": {
+        "runs": 5,
+        "invalid_runs": 0,
+        "recovered_runs": 5,
+        "recovery_rate": 100
+      },
+      "attributable_recovery_percentage_points": 0
+    },
+    "w2": {
+      "enabled": {
+        "runs": 5,
+        "invalid_runs": 0,
+        "recovered_runs": 5,
+        "recovery_rate": 100
+      },
+      "disabled": {
+        "runs": 5,
+        "invalid_runs": 0,
+        "recovered_runs": 0,
+        "recovery_rate": 0
+      },
+      "attributable_recovery_percentage_points": 100
+    },
+    "w3": {
+      "enabled": {
+        "runs": 5,
+        "invalid_runs": 0,
+        "recovered_runs": 0,
+        "recovery_rate": 0
+      },
+      "disabled": {
+        "runs": 3,
+        "invalid_runs": 0,
+        "recovered_runs": 0,
+        "recovery_rate": 0
+      },
+      "attributable_recovery_percentage_points": 0
+    }
+  },
+  "false_accept_count": 0,
+  "false_reject_count": 0,
+  "false_accept_rate": 0,
+  "false_reject_rate": 0,
+  "adversarial_cases": 0,
+  "adversarial_rejected": 0,
+  "adversarial_rejection_rate": 0,
+  "legitimate_cases": 0,
+  "legitimate_accepted": 0,
+  "legitimate_acceptance_rate": 0
+}

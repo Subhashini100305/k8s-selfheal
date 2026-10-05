@@ -1,0 +1,1 @@
+{"runID":"A2-02","workload":"W1","arm":"disabled","injectedAt":"2026-10-05T09:03:14.005676610Z","observationCutoffSeconds":300,"injectionSucceeded":true,"injectionExitCode":0,"recovered":true,"recoveryTimestamp":"2026-10-05T09:04:57.008049114Z","recoverySource":"unaided"}
