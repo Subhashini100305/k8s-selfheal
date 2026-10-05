@@ -56,11 +56,12 @@ type AuditRecord struct {
 	SafeForAutomation  bool   `json:"safe_for_automation"`
 	ClassifierDecision string `json:"classifier_decision"`
 
-	InputTokens      int     `json:"input_tokens"`
-	OutputTokens     int     `json:"output_tokens"`
-	TotalTokens      int     `json:"total_tokens"`
-	EstimatedCostUSD float64 `json:"estimated_cost_usd"`
-	CostKnown        bool    `json:"cost_known"`
+	InputTokens           int     `json:"input_tokens"`
+	OutputTokens          int     `json:"output_tokens"`
+	TotalTokens           int     `json:"total_tokens"`
+	EstimatedCostUSD      float64 `json:"estimated_cost_usd"`
+	CostKnown             bool    `json:"cost_known"`
+	RawClassifierResponse string  `json:"raw_classifier_response,omitempty"`
 
 	ProposalAccepted bool `json:"proposal_accepted"`
 	ProposalCorrect  bool `json:"proposal_correct"`

@@ -45,6 +45,7 @@ type ClassificationOutcome struct {
 	TotalTokens      int
 	EstimatedCostUSD float64
 	CostKnown        bool
+	RawResponse      string
 }
 
 type ClassifierMetadata interface {
@@ -432,6 +433,12 @@ func applyClassifierCallMetadata(
 		metadata.OutputTokens,
 	)
 	outcome.TotalTokens = usage.TotalTokens()
+	if metadata.TotalTokens > 0 {
+		outcome.TotalTokens = nonNegativeInt(
+			metadata.TotalTokens,
+		)
+	}
+	outcome.RawResponse = metadata.RawResponse
 
 	pricing, ok := PricingForModel(model)
 	if !ok {

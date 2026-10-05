@@ -21,7 +21,17 @@ type AuditEntry struct {
 	AttemptNumber int    `json:"attemptNumber,omitempty"`
 
 	// ClassifierMillis is emitted by the controller on the CLOSED line.
-	ClassifierMillis int64 `json:"classifierMillis,omitempty"`
+	ClassifierMillis      int64      `json:"classifierMillis,omitempty"`
+	ClassifierProvider    string     `json:"classifierProvider,omitempty"`
+	ClassifierModel       string     `json:"classifierModel,omitempty"`
+	ClassifierStartedAt   *time.Time `json:"classifierStartedAt,omitempty"`
+	ClassifierCompletedAt *time.Time `json:"classifierCompletedAt,omitempty"`
+	InputTokens           int        `json:"inputTokens,omitempty"`
+	OutputTokens          int        `json:"outputTokens,omitempty"`
+	TotalTokens           int        `json:"totalTokens,omitempty"`
+	EstimatedCostUSD      float64    `json:"estimatedCostUSD,omitempty"`
+	CostKnown             *bool      `json:"costKnown,omitempty"`
+	RawClassifierResponse string     `json:"rawClassifierResponse,omitempty"`
 }
 
 // AuditWriter appends one entry for a lifecycle transition.

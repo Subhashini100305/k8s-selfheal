@@ -134,6 +134,7 @@ type ClassifierCallMetadata struct {
 	InputTokens  int
 	OutputTokens int
 	TotalTokens  int
+	RawResponse  string
 }
 
 type MetadataClassifier interface {

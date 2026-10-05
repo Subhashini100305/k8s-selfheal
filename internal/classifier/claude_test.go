@@ -37,7 +37,7 @@ func TestClaudeResponseUsageJSONParses(t *testing.T) {
 		t.Fatalf("decode Claude response: %v", err)
 	}
 
-	metadata := claudeCallMetadata(response.Usage)
+	metadata := claudeCallMetadata(response.Usage, body)
 
 	if metadata.InputTokens != 1000 {
 		t.Fatalf(
@@ -58,6 +58,9 @@ func TestClaudeResponseUsageJSONParses(t *testing.T) {
 			"expected 1200 total tokens, got %d",
 			metadata.TotalTokens,
 		)
+	}
+	if !strings.Contains(metadata.RawResponse, `"id": "msg_test"`) {
+		t.Fatalf("expected raw Claude response to be preserved, got %q", metadata.RawResponse)
 	}
 }
 
@@ -156,7 +159,8 @@ func TestClaudeClassifierClassifyWithMetadataReturnsUsage(t *testing.T) {
 
 	if metadata.InputTokens != 1000 ||
 		metadata.OutputTokens != 200 ||
-		metadata.TotalTokens != 1200 {
+		metadata.TotalTokens != 1200 ||
+		!strings.Contains(metadata.RawResponse, `"msg_test"`) {
 
 		t.Fatalf(
 			"unexpected metadata: %#v",

@@ -32,6 +32,7 @@ func TestAuditRecordAppliesClassificationOutcomeObservability(t *testing.T) {
 		TotalTokens:           150,
 		EstimatedCostUSD:      0.00042,
 		CostKnown:             true,
+		RawResponse:           `{"id":"msg_test"}`,
 	}
 
 	record := AuditRecord{
@@ -124,6 +125,13 @@ func TestAuditRecordAppliesClassificationOutcomeObservability(t *testing.T) {
 			"expected cost known %v, got %v",
 			outcome.CostKnown,
 			record.CostKnown,
+		)
+	}
+	if record.RawClassifierResponse != outcome.RawResponse {
+		t.Fatalf(
+			"expected raw response %q, got %q",
+			outcome.RawResponse,
+			record.RawClassifierResponse,
 		)
 	}
 }

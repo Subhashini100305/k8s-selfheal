@@ -99,14 +99,24 @@ func parseAuditRecordsJSONL(data []byte) ([]AuditRecord, error) {
 }
 
 type week3AuditEvent struct {
-	IncidentID       string    `json:"incidentID"`
-	AttemptNumber    int       `json:"attemptNumber"`
-	Timestamp        time.Time `json:"timestamp"`
-	Pod              string    `json:"pod"`
-	State            string    `json:"state"`
-	Action           string    `json:"action"`
-	Result           string    `json:"result"`
-	ClassifierMillis int64     `json:"classifierMillis"`
+	IncidentID            string    `json:"incidentID"`
+	AttemptNumber         int       `json:"attemptNumber"`
+	Timestamp             time.Time `json:"timestamp"`
+	Pod                   string    `json:"pod"`
+	State                 string    `json:"state"`
+	Action                string    `json:"action"`
+	Result                string    `json:"result"`
+	ClassifierMillis      int64     `json:"classifierMillis"`
+	ClassifierProvider    string    `json:"classifierProvider"`
+	ClassifierModel       string    `json:"classifierModel"`
+	ClassifierStartedAt   time.Time `json:"classifierStartedAt"`
+	ClassifierCompletedAt time.Time `json:"classifierCompletedAt"`
+	InputTokens           int       `json:"inputTokens"`
+	OutputTokens          int       `json:"outputTokens"`
+	TotalTokens           int       `json:"totalTokens"`
+	EstimatedCostUSD      float64   `json:"estimatedCostUSD"`
+	CostKnown             *bool     `json:"costKnown"`
+	RawClassifierResponse string    `json:"rawClassifierResponse"`
 }
 
 func isWeek3AuditEventLine(line []byte) bool {
@@ -238,6 +248,18 @@ func applyWeek3ClosedEvent(
 	if event.ClassifierMillis > 0 {
 		record.ClassifierDurationSeconds = float64(event.ClassifierMillis) / 1000
 	}
+	record.ClassifierProvider = event.ClassifierProvider
+	record.ClassifierModel = event.ClassifierModel
+	record.ClassifierStartedAt = event.ClassifierStartedAt
+	record.ClassifierCompletedAt = event.ClassifierCompletedAt
+	record.InputTokens = event.InputTokens
+	record.OutputTokens = event.OutputTokens
+	record.TotalTokens = event.TotalTokens
+	record.EstimatedCostUSD = event.EstimatedCostUSD
+	if event.CostKnown != nil {
+		record.CostKnown = *event.CostKnown
+	}
+	record.RawClassifierResponse = event.RawClassifierResponse
 	switch strings.ToLower(strings.TrimSpace(event.Result)) {
 	case "recovered":
 		record.TerminalOutcome = "recovered"

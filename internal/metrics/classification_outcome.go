@@ -19,6 +19,7 @@ func ApplyClassificationOutcome(
 	record.TotalTokens = outcome.TotalTokens
 	record.EstimatedCostUSD = outcome.EstimatedCostUSD
 	record.CostKnown = outcome.CostKnown
+	record.RawClassifierResponse = outcome.RawResponse
 	record.ClassifierDurationSeconds =
 		outcome.ClassifierDuration.Seconds()
 

@@ -214,7 +214,7 @@ func (r *PodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 			}
 			classification := r.Classifier.ClassifyIncident(ctx, incident)
 			proposal := classification.Proposal
-			r.setClassifierDuration(key, classification.ClassifierDuration)
+			r.setClassifierOutcome(key, classification)
 
 			// classifyErr is always nil at this call site: ClassifyIncident
 			// never returns an error — a failed or invalid classification is

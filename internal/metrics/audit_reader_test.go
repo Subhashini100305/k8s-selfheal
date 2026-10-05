@@ -184,6 +184,76 @@ func TestLoadAuditRecordsWeek3RecoveredEventJSONL(t *testing.T) {
 	}
 }
 
+func TestLoadAuditRecordsWeek3ClosedClassifierMetadata(t *testing.T) {
+	baseTime := time.Date(
+		2026,
+		time.October,
+		4,
+		10,
+		0,
+		0,
+		0,
+		time.UTC,
+	)
+	startedAt := baseTime.Add(5 * time.Second)
+	completedAt := startedAt.Add(5475 * time.Millisecond)
+	costKnown := true
+
+	path := writeAuditFile(
+		t,
+		mustMarshalWeek3AuditEvents(
+			t,
+			[]week3AuditEvent{
+				week3Event(baseTime, "incident-metadata", 1, "REMEDIATING"),
+				{
+					IncidentID:            "incident-metadata",
+					AttemptNumber:         1,
+					Timestamp:             baseTime.Add(73 * time.Second),
+					Pod:                   "default/checkout-pod",
+					State:                 "CLOSED",
+					Action:                "restart_pod",
+					Result:                "recovered",
+					ClassifierMillis:      5475,
+					ClassifierProvider:    "claude",
+					ClassifierModel:       "claude-sonnet-4-5-20250929",
+					ClassifierStartedAt:   startedAt,
+					ClassifierCompletedAt: completedAt,
+					InputTokens:           26884,
+					OutputTokens:          3653,
+					TotalTokens:           30537,
+					EstimatedCostUSD:      0.135447,
+					CostKnown:             &costKnown,
+					RawClassifierResponse: `{"id":"msg_test"}`,
+				},
+			},
+		),
+	)
+
+	records, err := LoadAuditRecords(path)
+	if err != nil {
+		t.Fatalf("expected Week-3 event JSONL to load: %v", err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("expected 1 record, got %d", len(records))
+	}
+
+	record := records[0]
+	if record.ClassifierProvider != "claude" ||
+		record.ClassifierModel != "claude-sonnet-4-5-20250929" ||
+		!record.ClassifierStartedAt.Equal(startedAt) ||
+		!record.ClassifierCompletedAt.Equal(completedAt) ||
+		record.ClassifierDurationSeconds != 5.475 ||
+		record.InputTokens != 26884 ||
+		record.OutputTokens != 3653 ||
+		record.TotalTokens != 30537 ||
+		record.EstimatedCostUSD != 0.135447 ||
+		!record.CostKnown ||
+		record.RawClassifierResponse != `{"id":"msg_test"}` {
+
+		t.Fatalf("classifier metadata not parsed correctly: %+v", record)
+	}
+}
+
 func TestLoadAuditRecordsWeek3RolledBackEventJSONL(t *testing.T) {
 	baseTime := time.Date(
 		2026,

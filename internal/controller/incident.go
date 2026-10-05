@@ -10,6 +10,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	"github.com/aryausingh/k8s-selfheal/internal/classifier"
 	"github.com/aryausingh/k8s-selfheal/internal/safety"
 )
 
@@ -57,7 +58,7 @@ type incidentRecord struct {
 	// classifierMillis is how long the classifier call took. One value per
 	// incident, not per attempt: evidence is frozen at detection so every
 	// attempt classifies the same input.
-	classifierMillis int64
+	classifier classifierAuditMetadata
 }
 
 // stateClosed marks the single audit line that ends an incident. It is
@@ -66,10 +67,25 @@ type incidentRecord struct {
 const stateClosed = safety.State("CLOSED")
 
 type incidentClosure struct {
-	id               string
-	outcome          string
-	attempts         int
-	classifierMillis int64
+	id         string
+	outcome    string
+	attempts   int
+	classifier classifierAuditMetadata
+}
+
+type classifierAuditMetadata struct {
+	present               bool
+	provider              string
+	model                 string
+	startedAt             time.Time
+	completedAt           time.Time
+	duration              time.Duration
+	inputTokens           int
+	outputTokens          int
+	totalTokens           int
+	estimatedCostUSD      float64
+	costKnown             bool
+	rawClassifierResponse string
 }
 
 // admission is what beginAttempt tells Reconcile to do.
@@ -294,14 +310,27 @@ func (r *PodReconciler) freezeEvidence(key, logs string, events []string) {
 	record.evidenceCaptured = true
 }
 
-func (r *PodReconciler) setClassifierDuration(key string, took time.Duration) {
+func (r *PodReconciler) setClassifierOutcome(key string, outcome classifier.ClassificationOutcome) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	record := r.incidents[key]
 	if record == nil {
 		return
 	}
-	record.classifierMillis = took.Milliseconds()
+	record.classifier = classifierAuditMetadata{
+		present:               true,
+		provider:              outcome.ClassifierProvider,
+		model:                 outcome.ClassifierModel,
+		startedAt:             outcome.ClassifierStartedAt,
+		completedAt:           outcome.ClassifierCompletedAt,
+		duration:              outcome.ClassifierDuration,
+		inputTokens:           outcome.InputTokens,
+		outputTokens:          outcome.OutputTokens,
+		totalTokens:           outcome.TotalTokens,
+		estimatedCostUSD:      outcome.EstimatedCostUSD,
+		costKnown:             outcome.CostKnown,
+		rawClassifierResponse: outcome.RawResponse,
+	}
 }
 
 func (r *PodReconciler) closedIncident(key string) (incidentClosure, bool) {
@@ -312,10 +341,10 @@ func (r *PodReconciler) closedIncident(key string) (incidentClosure, bool) {
 		return incidentClosure{}, false
 	}
 	return incidentClosure{
-		id:               record.id,
-		outcome:          record.terminalOutcome,
-		attempts:         record.attemptCount,
-		classifierMillis: record.classifierMillis,
+		id:         record.id,
+		outcome:    record.terminalOutcome,
+		attempts:   record.attemptCount,
+		classifier: record.classifier,
 	}, true
 }
 
@@ -324,14 +353,33 @@ func (r *PodReconciler) auditIncidentClosed(ctx context.Context, podRef, action 
 		return
 	}
 	entry := safety.AuditEntry{
-		Timestamp:        time.Now(),
-		Pod:              podRef,
-		State:            stateClosed,
-		Action:           action,
-		Result:           closure.outcome,
-		IncidentID:       closure.id,
-		AttemptNumber:    closure.attempts,
-		ClassifierMillis: closure.classifierMillis,
+		Timestamp:     time.Now(),
+		Pod:           podRef,
+		State:         stateClosed,
+		Action:        action,
+		Result:        closure.outcome,
+		IncidentID:    closure.id,
+		AttemptNumber: closure.attempts,
+	}
+	if closure.classifier.present {
+		entry.ClassifierProvider = closure.classifier.provider
+		entry.ClassifierModel = closure.classifier.model
+		if !closure.classifier.startedAt.IsZero() {
+			startedAt := closure.classifier.startedAt
+			entry.ClassifierStartedAt = &startedAt
+		}
+		if !closure.classifier.completedAt.IsZero() {
+			completedAt := closure.classifier.completedAt
+			entry.ClassifierCompletedAt = &completedAt
+		}
+		entry.ClassifierMillis = closure.classifier.duration.Milliseconds()
+		entry.InputTokens = closure.classifier.inputTokens
+		entry.OutputTokens = closure.classifier.outputTokens
+		entry.TotalTokens = closure.classifier.totalTokens
+		entry.EstimatedCostUSD = closure.classifier.estimatedCostUSD
+		costKnown := closure.classifier.costKnown
+		entry.CostKnown = &costKnown
+		entry.RawClassifierResponse = closure.classifier.rawClassifierResponse
 	}
 	if err := r.Audit.Append(entry); err != nil {
 		log.FromContext(ctx).Error(err, "could not write the incident CLOSED audit line",

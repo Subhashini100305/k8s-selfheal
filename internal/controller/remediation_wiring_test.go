@@ -380,6 +380,82 @@ func TestReconcile_DispatchesRemediation_WhenSafeForAutomation(t *testing.T) {
 	}
 }
 
+func TestReconcile_ClosedAuditIncludesClassifierMetadata(t *testing.T) {
+	deploy, rs, pod := ownedPod(crashingContainerStatus("main", 3))
+	action := &stubRemediationAction{name: classifier.ActionRestartPod, called: make(chan contracts.DetectionEvent, 1)}
+	audit := &stubAuditWriter{}
+	startedAt := time.Date(2026, time.October, 5, 10, 0, 0, 0, time.UTC)
+	completedAt := startedAt.Add(5475 * time.Millisecond)
+	costKnown := true
+	outcome := classifier.ClassificationOutcome{
+		Proposal:              automateProposal(),
+		ClassifierStartedAt:   startedAt,
+		ClassifierCompletedAt: completedAt,
+		ClassifierDuration:    completedAt.Sub(startedAt),
+		ClassifierProvider:    classifier.ProviderClaude,
+		ClassifierModel:       "claude-sonnet-4-5-20250929",
+		InputTokens:           26884,
+		OutputTokens:          3653,
+		TotalTokens:           30537,
+		EstimatedCostUSD:      0.135447,
+		CostKnown:             costKnown,
+		RawResponse:           `{"id":"msg_test","content":[{"type":"text","text":"{\"sub_cause\":\"transient_failure\"}"}]}`,
+	}
+	r := &PodReconciler{
+		Client:     fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(deploy, rs, pod).Build(),
+		ManagerCtx: context.Background(),
+		Classifier: stubIncidentClassifier{outcome: outcome},
+		Actions:    map[string]safety.RemediationAction{classifier.ActionRestartPod: action},
+		Snapshots:  stubSnapshotStore{},
+		Verifier:   stubVerifier{recovered: true},
+		Audit:      audit,
+		Clock:      safety.RealClock{},
+	}
+	ctx, _ := newTestContext()
+
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: testNamespace, Name: testPodName}}); err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+
+	select {
+	case <-action.called:
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected the injected action to be executed")
+	}
+	waitForGuardCleared(t, r)
+
+	var closed safety.AuditEntry
+	for _, entry := range audit.snapshot() {
+		if entry.State == stateClosed {
+			closed = entry
+			break
+		}
+	}
+	if closed.State != stateClosed {
+		t.Fatal("expected CLOSED audit entry")
+	}
+	if closed.ClassifierProvider != outcome.ClassifierProvider ||
+		closed.ClassifierModel != outcome.ClassifierModel ||
+		closed.ClassifierMillis != outcome.ClassifierDuration.Milliseconds() ||
+		closed.InputTokens != outcome.InputTokens ||
+		closed.OutputTokens != outcome.OutputTokens ||
+		closed.TotalTokens != outcome.TotalTokens ||
+		closed.EstimatedCostUSD != outcome.EstimatedCostUSD ||
+		closed.CostKnown == nil ||
+		*closed.CostKnown != outcome.CostKnown ||
+		closed.RawClassifierResponse != outcome.RawResponse {
+
+		t.Fatalf("CLOSED classifier metadata = %+v, want outcome %+v", closed, outcome)
+	}
+	if closed.ClassifierStartedAt == nil ||
+		!closed.ClassifierStartedAt.Equal(startedAt) ||
+		closed.ClassifierCompletedAt == nil ||
+		!closed.ClassifierCompletedAt.Equal(completedAt) {
+
+		t.Fatalf("CLOSED classifier timestamps = %v/%v", closed.ClassifierStartedAt, closed.ClassifierCompletedAt)
+	}
+}
+
 func TestReconcile_RemediationFailure_StillReleasesGuard(t *testing.T) {
 	deploy, rs, pod := ownedPod(crashingContainerStatus("main", 3))
 	action := &stubRemediationAction{

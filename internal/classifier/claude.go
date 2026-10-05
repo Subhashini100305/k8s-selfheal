@@ -285,11 +285,12 @@ func (c *ClaudeClassifier) ClassifyWithMetadata(
 		)
 	}
 
-	return proposal, claudeCallMetadata(claudeResp.Usage), nil
+	return proposal, claudeCallMetadata(claudeResp.Usage, responseBody), nil
 }
 
 func claudeCallMetadata(
 	usage claudeUsage,
+	rawResponse []byte,
 ) ClassifierCallMetadata {
 	tokenUsage := TokenUsage(usage)
 
@@ -297,6 +298,7 @@ func claudeCallMetadata(
 		InputTokens:  nonNegativeInt(usage.InputTokens),
 		OutputTokens: nonNegativeInt(usage.OutputTokens),
 		TotalTokens:  tokenUsage.TotalTokens(),
+		RawResponse:  strings.TrimSpace(string(rawResponse)),
 	}
 }
 

@@ -240,6 +240,7 @@ func TestClassificationServiceMetadataClassifierPopulatesUsageAndCost(t *testing
 			InputTokens:  1000,
 			OutputTokens: 200,
 			TotalTokens:  1200,
+			RawResponse:  `{"content":[{"type":"text","text":"{}"}]}`,
 		},
 		provider: ProviderClaude,
 		model:    claudeSonnet5Model,
@@ -290,6 +291,9 @@ func TestClassificationServiceMetadataClassifierPopulatesUsageAndCost(t *testing
 
 	if !outcome.CostKnown {
 		t.Fatal("expected known cost for Claude Sonnet 5")
+	}
+	if outcome.RawResponse != `{"content":[{"type":"text","text":"{}"}]}` {
+		t.Fatalf("raw response was not preserved: %q", outcome.RawResponse)
 	}
 
 	expectedCost := 0.004
