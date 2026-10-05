@@ -6,14 +6,14 @@ usage() {
 Usage:
   reset-audit.sh [--namespace k8s-selfheal-system]
 
-Truncates /var/lib/sage/audit/audit.jsonl on the audit-data PVC using a short
-BusyBox helper Pod. Scale the controller manager to zero before running this so
-there is exactly one writer/ownership domain for the audit file.
+Truncates /var/lib/sage/audit/audit.jsonl on the k8s-selfheal-audit-data PVC
+using a short BusyBox helper Pod. Scale the controller manager to zero before
+running this so there is exactly one writer/ownership domain for the audit file.
 USAGE
 }
 
 namespace="k8s-selfheal-system"
-pvc="audit-data"
+pvc="k8s-selfheal-audit-data"
 pod="audit-reset-$(date +%s)"
 
 while [[ $# -gt 0 ]]; do

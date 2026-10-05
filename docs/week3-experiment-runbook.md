@@ -69,6 +69,11 @@ hack/experiment/record-injection.sh \
 
 # After the run reaches its expected lifecycle state, export the PVC audit file.
 hack/experiment/export-audit.sh --output runs/A1-smoke/audit.jsonl
+# If W1 has no CLOSED line and later becomes Ready/stable, record unaided
+# experiment recovery in meta.json without fabricating controller recovery.
+hack/experiment/observe-ready.sh \
+  --meta runs/A1-smoke/meta.json \
+  --selector app=w1-transient
 kubectl delete -f hack/manifests/w1-transient.yaml --ignore-not-found=true
 go run ./cmd/report -run-dir runs/A1-smoke
 ```

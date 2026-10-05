@@ -287,6 +287,54 @@ func TestLoadRunArchiveInfersEnabledControllerRecovery(t *testing.T) {
 	}
 }
 
+func TestLoadRunArchiveReportsEnabledW1AbandonedUnaidedRecovery(t *testing.T) {
+	dir := t.TempDir()
+	runDir := filepath.Join(dir, "A1-smoke")
+	if err := os.Mkdir(runDir, 0o700); err != nil {
+		t.Fatalf("mkdir run dir: %v", err)
+	}
+	meta := []byte(`{"runID":"A1-smoke","workload":"W1","arm":"enabled","injectedAt":"2026-10-05T10:00:00Z","injectionSucceeded":true,"recovered":true,"recoveryTimestamp":"2026-10-05T10:06:15Z","recoverySource":"unaided"}`)
+	if err := os.WriteFile(filepath.Join(runDir, "meta.json"), meta, 0o600); err != nil {
+		t.Fatalf("write meta: %v", err)
+	}
+	audit := []byte(
+		`{"incidentID":"incident-w1","attemptNumber":1,"timestamp":"2026-10-05T10:00:14Z","pod":"default/w1-pod","state":"DETECTED","action":"restart_pod","result":"received"}` + "\n" +
+			`{"incidentID":"incident-w1","attemptNumber":1,"timestamp":"2026-10-05T10:00:14Z","pod":"default/w1-pod","state":"SNAPSHOTTED","action":"restart_pod","result":"captured"}` + "\n" +
+			`{"incidentID":"incident-w1","attemptNumber":1,"timestamp":"2026-10-05T10:00:15Z","pod":"default/w1-pod","state":"REMEDIATING","action":"restart_pod","result":"started"}` + "\n" +
+			`{"incidentID":"incident-w1","attemptNumber":1,"timestamp":"2026-10-05T10:00:16Z","pod":"default/w1-pod","state":"VERIFYING","action":"restart_pod","result":"started"}` + "\n" +
+			`{"incidentID":"incident-w1","attemptNumber":1,"timestamp":"2026-10-05T10:00:46Z","pod":"default/w1-pod","state":"ROLLING_BACK","action":"restart_pod","result":"pod did not become Ready before initial readiness timeout"}` + "\n" +
+			`{"incidentID":"incident-w1","attemptNumber":1,"timestamp":"2026-10-05T10:00:47Z","pod":"default/w1-pod","state":"ROLLED_BACK","action":"restart_pod","result":"restored"}` + "\n" +
+			`{"incidentID":"incident-w1","attemptNumber":1,"timestamp":"2026-10-05T10:00:47Z","pod":"default/w1-pod","state":"LOGGED","action":"restart_pod","result":"rolled_back"}` + "\n",
+	)
+	if err := os.WriteFile(filepath.Join(runDir, "audit.jsonl"), audit, 0o600); err != nil {
+		t.Fatalf("write audit: %v", err)
+	}
+
+	archive, err := LoadRunArchive(runDir)
+	if err != nil {
+		t.Fatalf("LoadRunArchive() error = %v", err)
+	}
+	controllerSummary := Calculate(archive.Records)
+	if controllerSummary.AbandonedIncidents != 1 ||
+		controllerSummary.SuccessfulRecoveries != 0 ||
+		controllerSummary.TotalRollbacks != 1 ||
+		controllerSummary.RemediationAttempts != 1 {
+		t.Fatalf("unexpected controller summary: %+v", controllerSummary)
+	}
+	if controllerSummary.OutcomeDistribution["recovered"] != 0 {
+		t.Fatalf("rolled-back abandoned W1 must not fabricate controller recovery: %+v", controllerSummary.OutcomeDistribution)
+	}
+	experimentSummary, err := CalculateExperimentRecovery([]RunMeta{archive.Meta})
+	if err != nil {
+		t.Fatalf("CalculateExperimentRecovery() error = %v", err)
+	}
+	if experimentSummary.W1.Enabled.Runs != 1 ||
+		experimentSummary.W1.Enabled.RecoveredRuns != 1 ||
+		experimentSummary.W1.Enabled.RecoveryRate != 100 {
+		t.Fatalf("unexpected experiment recovery summary: %+v", experimentSummary)
+	}
+}
+
 func TestDecodeRunMetaRejectsMalformedJSON(t *testing.T) {
 	if _, err := DecodeRunMeta(bytes.NewBufferString("{")); err == nil {
 		t.Fatal("expected malformed metadata JSON to fail")

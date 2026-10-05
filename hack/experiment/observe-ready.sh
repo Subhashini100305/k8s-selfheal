@@ -8,7 +8,9 @@ Usage:
 
 Polls Pods matching the selector until either one has been Ready continuously
 for 60 seconds or the disabled-arm 300 second cutoff expires. Updates meta.json
-with recovered/recoveryTimestamp/recoverySource/observedUntil.
+with recovered/recoveryTimestamp/recoverySource/observedUntil. Enabled runs
+have no 300 second cutoff; use this after an abandoned W1 controller incident
+to record unaided experiment recovery without fabricating CLOSED.
 USAGE
 }
 
@@ -49,9 +51,18 @@ PY
 }
 
 injected_at="$(read_meta_field injectedAt)"
+arm="$(read_meta_field arm)"
 cutoff="$(read_meta_field observationCutoffSeconds)"
-if [[ -z "$injected_at" || "$cutoff" != "300" ]]; then
-  echo "disabled observation requires injectedAt and observationCutoffSeconds=300" >&2
+if [[ -z "$injected_at" ]]; then
+  echo "observation requires injectedAt" >&2
+  exit 2
+fi
+if [[ "$arm" != "enabled" && "$arm" != "disabled" ]]; then
+  echo "observation requires arm=enabled or arm=disabled" >&2
+  exit 2
+fi
+if [[ "$arm" == "disabled" && "$cutoff" != "300" ]]; then
+  echo "disabled observation requires observationCutoffSeconds=300" >&2
   exit 2
 fi
 
@@ -110,7 +121,7 @@ while true; do
     ready_since=0
   fi
 
-  if [[ "$now_epoch" -ge "$cutoff_epoch" ]]; then
+  if [[ "$arm" == "disabled" && "$now_epoch" -ge "$cutoff_epoch" ]]; then
     update_meta false "$now_iso" not_recovered_within_300s
     exit 0
   fi

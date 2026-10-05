@@ -7,8 +7,8 @@ Usage:
   record-injection.sh --output PATH --run-id ID --workload W1|W2|W3 --arm enabled|disabled -- kubectl ...
 
 Writes Owner-3 run metadata JSON and executes the fault-injection command in
-the same process. For disabled runs, later observation updates the same
-meta.json with recovery/not_recovered_within_300s.
+the same process. Later observation can update the same meta.json with
+recovery, unaided recovery, or not_recovered_within_300s.
 USAGE
 }
 

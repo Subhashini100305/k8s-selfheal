@@ -6,15 +6,15 @@ usage() {
 Usage:
   export-audit.sh --output runs/A1-01/audit.jsonl [--namespace k8s-selfheal-system]
 
-Exports /var/lib/sage/audit/audit.jsonl from the audit-data PVC using a short
-BusyBox helper Pod. This avoids relying on shell tools inside the distroless
-manager container.
+Exports /var/lib/sage/audit/audit.jsonl from the k8s-selfheal-audit-data PVC
+using a short BusyBox helper Pod. This avoids relying on shell tools inside
+the distroless manager container.
 USAGE
 }
 
 namespace="k8s-selfheal-system"
 output=""
-pvc="audit-data"
+pvc="k8s-selfheal-audit-data"
 pod="audit-export-$(date +%s)"
 
 while [[ $# -gt 0 ]]; do
