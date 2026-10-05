@@ -6,7 +6,8 @@ usage() {
 Usage:
   reset-audit.sh [--namespace k8s-selfheal-system]
 
-Truncates /var/lib/sage/audit/audit.jsonl on the k8s-selfheal-audit-data PVC
+Truncates /var/lib/sage/audit/audit.jsonl and classifier-calls.jsonl on the
+k8s-selfheal-audit-data PVC
 using a short BusyBox helper Pod. Scale the controller manager to zero before
 running this so there is exactly one writer/ownership domain for the audit file.
 USAGE
@@ -36,4 +37,4 @@ kubectl run -n "$namespace" "$pod" \
   --overrides='{"spec":{"volumes":[{"name":"audit","persistentVolumeClaim":{"claimName":"'"$pvc"'"}}],"containers":[{"name":"reset","image":"busybox:1.36","command":["sleep","3600"],"volumeMounts":[{"name":"audit","mountPath":"/audit"}]}]}}'
 
 kubectl wait -n "$namespace" --for=condition=Ready "pod/$pod" --timeout=60s
-kubectl exec -n "$namespace" "$pod" -- sh -c ': > /audit/audit.jsonl'
+kubectl exec -n "$namespace" "$pod" -- sh -c ': > /audit/audit.jsonl; : > /audit/classifier-calls.jsonl'

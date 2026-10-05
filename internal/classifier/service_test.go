@@ -2,8 +2,11 @@ package classifier
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"math"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -48,6 +51,10 @@ type metadataClassifierStub struct {
 	metadataCalls int
 	provider      string
 	model         string
+}
+
+type failingClassificationCallRecorder struct {
+	err error
 }
 
 func (c *countingClassifier) Classify(
@@ -104,6 +111,13 @@ func (c delayedClassifier) Classify(
 	case <-timer.C:
 		return c.proposal, nil
 	}
+}
+
+func (r failingClassificationCallRecorder) RecordClassificationCall(
+	input IncidentInput,
+	outcome ClassificationOutcome,
+) error {
+	return r.err
 }
 
 func TestClassificationServiceSatisfiesIncidentClassifier(t *testing.T) {
@@ -304,6 +318,228 @@ func TestClassificationServiceMetadataClassifierPopulatesUsageAndCost(t *testing
 			"expected cost %.6f, got %.6f",
 			expectedCost,
 			outcome.EstimatedCostUSD,
+		)
+	}
+}
+
+func TestClassificationServicePersistsClassifierCallWhenConfigured(t *testing.T) {
+	input := serviceTransientIncident()
+	path := filepath.Join(
+		t.TempDir(),
+		"classifier-calls.jsonl",
+	)
+
+	t.Setenv(
+		ClassifierCallLogPathEnv,
+		path,
+	)
+
+	classifier := &metadataClassifierStub{
+		proposal: serviceTransientProposal(input),
+		metadata: ClassifierCallMetadata{
+			InputTokens:  1000,
+			OutputTokens: 200,
+			TotalTokens:  1200,
+			RawResponse:  `{"id":"msg_test","content":[{"type":"text","text":"{}"}]}`,
+		},
+		provider: ProviderClaude,
+		model:    claudeSonnet5Model,
+	}
+
+	service := NewClassificationService(
+		classifier,
+		time.Second,
+	)
+
+	outcome := service.ClassifyAndValidate(
+		context.Background(),
+		input,
+	)
+
+	if outcome.FallbackUsed {
+		t.Fatalf(
+			"expected direct classification, fallback reason: %s",
+			outcome.FallbackReason,
+		)
+	}
+
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read classifier call log: %v", err)
+	}
+
+	lines := strings.Split(
+		strings.TrimSpace(string(content)),
+		"\n",
+	)
+	if len(lines) != 1 {
+		t.Fatalf("expected one JSONL record, got %d", len(lines))
+	}
+
+	var record ClassificationCallRecord
+	if err := json.Unmarshal(
+		[]byte(lines[0]),
+		&record,
+	); err != nil {
+		t.Fatalf("decode classifier call record: %v", err)
+	}
+
+	if record.PodName != input.PodName ||
+		record.Namespace != input.Namespace ||
+		record.OwnerDeployment != input.OwnerDeployment {
+
+		t.Fatalf("unexpected incident identity: %#v", record)
+	}
+
+	if record.ClassifierProvider != ProviderClaude ||
+		record.ClassifierModel != claudeSonnet5Model {
+
+		t.Fatalf(
+			"unexpected provider/model: %s/%s",
+			record.ClassifierProvider,
+			record.ClassifierModel,
+		)
+	}
+
+	if record.InputTokens != outcome.InputTokens ||
+		record.OutputTokens != outcome.OutputTokens ||
+		record.TotalTokens != outcome.TotalTokens {
+
+		t.Fatalf("unexpected token counts: %#v", record)
+	}
+
+	if !record.CostKnown ||
+		record.EstimatedCostUSD != outcome.EstimatedCostUSD {
+
+		t.Fatalf("unexpected cost fields: %#v", record)
+	}
+
+	if record.RawClassifierResponse != outcome.RawResponse {
+		t.Fatalf(
+			"expected raw response %q, got %q",
+			outcome.RawResponse,
+			record.RawClassifierResponse,
+		)
+	}
+
+	if record.FallbackUsed {
+		t.Fatal("expected fallbackUsed to be false")
+	}
+
+	if record.FallbackReason != "" {
+		t.Fatalf(
+			"expected empty fallback reason, got %q",
+			record.FallbackReason,
+		)
+	}
+
+	if record.RecommendedAction != outcome.Proposal.RecommendedAction ||
+		record.SubCause != outcome.Proposal.SubCause {
+
+		t.Fatalf(
+			"unexpected final proposal fields: action=%s subCause=%s",
+			record.RecommendedAction,
+			record.SubCause,
+		)
+	}
+
+	if record.ClassifierStartedAt.IsZero() ||
+		record.ClassifierCompletedAt.IsZero() ||
+		record.Timestamp.IsZero() {
+
+		t.Fatalf("expected classifier timestamps: %#v", record)
+	}
+}
+
+func TestClassificationServiceDoesNotPersistClassifierCallWhenUnconfigured(t *testing.T) {
+	t.Setenv(
+		ClassifierCallLogPathEnv,
+		"",
+	)
+
+	input := serviceTransientIncident()
+	tempDir := t.TempDir()
+	service := NewClassificationService(
+		MockClassifier{},
+		time.Second,
+	)
+
+	outcome := service.ClassifyAndValidate(
+		context.Background(),
+		input,
+	)
+	if outcome.FallbackUsed {
+		t.Fatalf(
+			"expected direct classification, fallback reason: %s",
+			outcome.FallbackReason,
+		)
+	}
+
+	entries, err := os.ReadDir(tempDir)
+	if err != nil {
+		t.Fatalf("read temp dir: %v", err)
+	}
+
+	if len(entries) != 0 {
+		t.Fatalf(
+			"expected no classifier call log files, got %d",
+			len(entries),
+		)
+	}
+}
+
+func TestClassificationServiceRecorderFailureDoesNotChangeOutcome(t *testing.T) {
+	input := serviceTransientIncident()
+	classifier := &metadataClassifierStub{
+		proposal: serviceTransientProposal(input),
+		metadata: ClassifierCallMetadata{
+			InputTokens:  1000,
+			OutputTokens: 200,
+			TotalTokens:  1200,
+			RawResponse:  `{"id":"msg_test"}`,
+		},
+		provider: ProviderClaude,
+		model:    claudeSonnet5Model,
+	}
+
+	service := NewClassificationService(
+		classifier,
+		time.Second,
+	)
+	service.CallRecorder = failingClassificationCallRecorder{
+		err: errors.New("disk full"),
+	}
+
+	outcome := service.ClassifyAndValidate(
+		context.Background(),
+		input,
+	)
+
+	if outcome.FallbackUsed {
+		t.Fatalf(
+			"recorder failure changed outcome to fallback: %s",
+			outcome.FallbackReason,
+		)
+	}
+
+	if outcome.Proposal.RecommendedAction != ActionRestartPod ||
+		outcome.Proposal.SubCause != SubCauseTransientFailure {
+
+		t.Fatalf(
+			"recorder failure changed proposal: %#v",
+			outcome.Proposal,
+		)
+	}
+
+	if outcome.InputTokens != 1000 ||
+		outcome.OutputTokens != 200 ||
+		outcome.TotalTokens != 1200 ||
+		!outcome.CostKnown ||
+		outcome.RawResponse != `{"id":"msg_test"}` {
+
+		t.Fatalf(
+			"recorder failure changed metadata: %#v",
+			outcome,
 		)
 	}
 }

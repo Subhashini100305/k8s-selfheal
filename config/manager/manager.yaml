@@ -65,6 +65,9 @@ spec:
           - --leader-elect
           - --health-probe-bind-address=:8081
           - --audit-path=/var/lib/sage/audit/audit.jsonl
+        env:
+        - name: SAGE_CLASSIFIER_CALLS_FILE
+          value: /var/lib/sage/audit/classifier-calls.jsonl
         image: controller:latest
         name: manager
         ports:

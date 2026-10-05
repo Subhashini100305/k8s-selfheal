@@ -14,8 +14,9 @@ var errClassifierNotConfigured = errors.New("classifier is not configured")
 const unknownClassifierMetadata = "unknown"
 
 type ClassificationService struct {
-	Classifier Classifier
-	Timeout    time.Duration
+	Classifier   Classifier
+	Timeout      time.Duration
+	CallRecorder ClassificationCallRecorder
 }
 
 type IncidentClassifier interface {
@@ -58,8 +59,9 @@ func NewClassificationService(
 	timeout time.Duration,
 ) *ClassificationService {
 	return &ClassificationService{
-		Classifier: c,
-		Timeout:    timeout,
+		Classifier:   c,
+		Timeout:      timeout,
+		CallRecorder: NewJSONLClassificationCallRecorderFromEnv(),
 	}
 }
 
@@ -77,7 +79,7 @@ func (s *ClassificationService) ClassifyAndValidate(
 	if classifier == nil {
 		startedAt := time.Now()
 
-		return fallbackClassificationOutcome(
+		outcome := fallbackClassificationOutcome(
 			input,
 			errClassifierNotConfigured.Error(),
 			ReasonCodeNone,
@@ -87,6 +89,9 @@ func (s *ClassificationService) ClassifyAndValidate(
 			provider,
 			model,
 		)
+
+		s.recordClassificationCall(input, outcome)
+		return outcome
 	}
 
 	callCtx, cancel := context.WithTimeout(
@@ -137,6 +142,7 @@ func (s *ClassificationService) ClassifyAndValidate(
 			)
 			outcome.OriginalProposal = result.proposal
 
+			s.recordClassificationCall(input, outcome)
 			return outcome
 		}
 
@@ -173,6 +179,7 @@ func (s *ClassificationService) ClassifyAndValidate(
 			)
 			outcome.OriginalProposal = result.proposal
 
+			s.recordClassificationCall(input, outcome)
 			return outcome
 		}
 
@@ -196,13 +203,14 @@ func (s *ClassificationService) ClassifyAndValidate(
 			model,
 		)
 
+		s.recordClassificationCall(input, outcome)
 		return outcome
 
 	case <-callCtx.Done():
 		err := callCtx.Err()
 		completedAt := time.Now()
 
-		return fallbackClassificationOutcome(
+		outcome := fallbackClassificationOutcome(
 			input,
 			classifierFailureReason(err),
 			ReasonCodeNone,
@@ -212,6 +220,9 @@ func (s *ClassificationService) ClassifyAndValidate(
 			provider,
 			model,
 		)
+
+		s.recordClassificationCall(input, outcome)
+		return outcome
 	}
 }
 
@@ -241,6 +252,22 @@ func (s *ClassificationService) timeout() time.Duration {
 	}
 
 	return s.Timeout
+}
+
+func (s *ClassificationService) recordClassificationCall(
+	input IncidentInput,
+	outcome ClassificationOutcome,
+) {
+	if s == nil ||
+		s.CallRecorder == nil {
+
+		return
+	}
+
+	_ = s.CallRecorder.RecordClassificationCall(
+		input,
+		outcome,
+	)
 }
 
 type classificationCallResult struct {

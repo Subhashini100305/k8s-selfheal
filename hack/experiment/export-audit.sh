@@ -8,7 +8,8 @@ Usage:
 
 Exports /var/lib/sage/audit/audit.jsonl from the k8s-selfheal-audit-data PVC
 using a short BusyBox helper Pod. This avoids relying on shell tools inside
-the distroless manager container.
+the distroless manager container. If classifier-calls.jsonl exists on the
+same PVC, it is exported next to audit.jsonl.
 USAGE
 }
 
@@ -45,3 +46,7 @@ kubectl run -n "$namespace" "$pod" \
 kubectl wait -n "$namespace" --for=condition=Ready "pod/$pod" --timeout=60s
 mkdir -p "$(dirname "$output")"
 kubectl exec -n "$namespace" "$pod" -- cat /audit/audit.jsonl > "$output"
+classifier_output="$(dirname "$output")/classifier-calls.jsonl"
+if kubectl exec -n "$namespace" "$pod" -- test -f /audit/classifier-calls.jsonl; then
+  kubectl exec -n "$namespace" "$pod" -- cat /audit/classifier-calls.jsonl > "$classifier_output"
+fi
