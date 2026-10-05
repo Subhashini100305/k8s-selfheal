@@ -65,6 +65,41 @@ func TestCalculateWeek3IncompleteIncident(t *testing.T) {
 	if got.FailedRecoveries != 0 {
 		t.Fatalf("incomplete incident must not be counted as failed")
 	}
+	if got.AbandonedIncidents != 0 {
+		t.Fatalf("incident without completed attempts must not be abandoned")
+	}
+}
+
+func TestCalculateWeek3AbandonedIncident(t *testing.T) {
+	base := time.Date(2026, time.September, 29, 10, 0, 0, 0, time.UTC)
+	got := Calculate([]AuditRecord{{
+		IncidentID: "abandoned", Workload: "W1", ExperimentArm: "enabled",
+		AttemptNumber: 1, RemediationAttempt: true,
+		DetectedAt: base, ActionStartedAt: base.Add(time.Second),
+		ActionCompletedAt:       base.Add(2 * time.Second),
+		VerificationStartedAt:   base.Add(2 * time.Second),
+		VerificationCompletedAt: base.Add(32 * time.Second),
+		RollbackStartedAt:       base.Add(32 * time.Second),
+		RollbackCompletedAt:     base.Add(33 * time.Second),
+		RolledBack:              true,
+	}})
+
+	if got.TotalIncidents != 1 ||
+		got.TerminalIncidents != 0 ||
+		got.IncompleteIncidents != 1 ||
+		got.AbandonedIncidents != 1 {
+
+		t.Fatalf("unexpected abandoned incident counts: %+v", got)
+	}
+	if got.SuccessfulRecoveries != 0 || got.FailedRecoveries != 0 {
+		t.Fatalf("abandoned incident must not be counted as recovery/failure: %+v", got)
+	}
+	if got.RemediationAttempts != 1 || got.TotalRollbacks != 1 {
+		t.Fatalf("abandoned incident must retain attempt metrics: %+v", got)
+	}
+	if got.IncidentRollbackRate != 0 {
+		t.Fatalf("abandoned incident must be excluded from incident rollback denominator")
+	}
 }
 
 func TestCalculateWeek3IncidentRollbackDenominatorExcludesEscalatedAndRejected(t *testing.T) {

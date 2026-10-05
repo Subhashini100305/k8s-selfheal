@@ -32,12 +32,19 @@ func TestPrometheusMetricsHandlerExposesExpectedMetrics(t *testing.T) {
 		"selfheal_total_incidents",
 		"selfheal_successful_recoveries_total",
 		"selfheal_failed_recoveries_total",
+		"selfheal_terminal_incidents_total",
+		"selfheal_incomplete_incidents_total",
+		"selfheal_abandoned_incidents_total",
 		"selfheal_remediation_attempts_total",
 		"selfheal_rollback_total",
+		"selfheal_rollback_rate_attempts",
+		"selfheal_rollback_rate_incidents",
 		"selfheal_recovery_success_rate",
 		"selfheal_average_ttd_seconds",
 		"selfheal_average_ttm_seconds",
 		"selfheal_classifier_inference_latency_seconds",
+		"selfheal_average_apply_seconds",
+		"selfheal_average_verify_seconds",
 		"selfheal_cluster_convergence_seconds",
 		"selfheal_false_accept_total",
 		"selfheal_false_reject_total",
@@ -45,6 +52,7 @@ func TestPrometheusMetricsHandlerExposesExpectedMetrics(t *testing.T) {
 		"selfheal_false_reject_rate",
 		"selfheal_classifier_estimated_cost_usd",
 		"selfheal_validator_decisions_total",
+		"selfheal_incident_outcomes_total",
 	}
 
 	for _, name := range expectedNames {
@@ -61,6 +69,7 @@ func TestPrometheusMetricsHandlerRepresentsSummaryValues(t *testing.T) {
 		"selfheal_total_incidents 3",
 		"selfheal_successful_recoveries_total 2",
 		"selfheal_failed_recoveries_total 1",
+		"selfheal_terminal_incidents_total 3",
 		"selfheal_remediation_attempts_total 2",
 		"selfheal_rollback_total 1",
 		"selfheal_false_accept_total 1",
@@ -71,6 +80,23 @@ func TestPrometheusMetricsHandlerRepresentsSummaryValues(t *testing.T) {
 		if !strings.Contains(body, sample) {
 			t.Fatalf("expected sample %q in body:\n%s", sample, body)
 		}
+	}
+}
+
+func TestPrometheusMetricsHandlerOutcomeCounts(t *testing.T) {
+	body := scrapePrometheusTestMetrics(t)
+
+	if !strings.Contains(
+		body,
+		`selfheal_incident_outcomes_total{outcome="recovered"} 2`,
+	) {
+		t.Fatalf("expected recovered outcome count in body:\n%s", body)
+	}
+	if !strings.Contains(
+		body,
+		`selfheal_incident_outcomes_total{outcome="rolled_back"} 1`,
+	) {
+		t.Fatalf("expected rolled_back outcome count in body:\n%s", body)
 	}
 }
 

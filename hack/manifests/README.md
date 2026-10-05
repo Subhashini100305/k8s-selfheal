@@ -206,8 +206,8 @@ docker exec selfheal-control-plane rm -rf /tmp/k8s-selfheal
 The four scenarios above are the Week 2 *demo* set — they prove each terminal
 outcome individually. The experiment runs on a different, frozen set of
 **three** workloads, chosen so that every contribution claim has something to
-measure. IDs are stable and appear in the audit log's `workload` field; do not
-rename them.
+measure. IDs are stable and appear in each run's `meta.json` `workload` field;
+do not rename them.
 
 | ID | Manifest | What it is | Without controller | With controller |
 |---|---|---|---|---|

@@ -18,24 +18,42 @@ Local `make run` keeps `--audit-path` empty and writes JSONL to stdout.
 
 ## Frozen shared event schema
 
-Every transition contains exactly:
+Every safety lifecycle transition contains:
 
 ```json
 {
   "incidentID": "string",
   "attemptNumber": 1,
   "timestamp": "RFC3339 timestamp",
+  "pod": "namespace/pod-name",
   "state": "DETECTED",
   "action": "restart_pod",
-  "result": "received",
-  "workload": "W1",
-  "armLabel": "enabled"
+  "result": "received"
 }
 ```
 
 `incidentID` and `attemptNumber` come from Owner 1's `DetectionEvent`.
-`workload` and `armLabel` are explicit `AuditMetadata` supplied by the
-experiment harness through the controller. Safety does not infer them.
+`pod` is written as `namespace/name`. Workload, arm, fault-injection time, and
+external recovery observations live in the per-run `meta.json`, not on every
+safety audit line.
+
+The controller appends one incident-terminal line:
+
+```json
+{
+  "incidentID": "string",
+  "attemptNumber": 1,
+  "timestamp": "RFC3339 timestamp",
+  "pod": "namespace/pod-name",
+  "state": "CLOSED",
+  "action": "restart_pod",
+  "result": "recovered",
+  "classifierMillis": 125
+}
+```
+
+`CLOSED/result` is authoritative for incident outcomes. `ROLLED_BACK` remains
+attempt-level only.
 
 Owner 3 adapts these camelCase transition events into its internal aggregate
 metrics representation. Snake_case aggregate fields are deliberately not part
@@ -50,8 +68,9 @@ durations. In particular:
 - verification begins at `VERIFYING` and finishes at `RECOVERED` or
   `ROLLING_BACK`;
 - rollback begins at `ROLLING_BACK` and completes at `ROLLED_BACK`;
-- TTM begins at the `DetectionEvent` timestamp and ends at the incident's
-  terminal outcome.
+- TTD begins at `meta.injectedAt` and ends at `DETECTED.timestamp`;
+- TTM begins at `DETECTED.timestamp` and ends at the incident's `CLOSED`
+  timestamp.
 
 Fault-injection and classifier timestamps originate outside safety and must be
 joined by Owner 3's adapter. They are never fabricated from nearby safety

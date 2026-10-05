@@ -44,6 +44,21 @@ func NewPrometheusRegistry(
 			value: float64(summary.FailedRecoveries),
 		},
 		{
+			name:  "terminal_incidents_total",
+			help:  "Terminal incidents in the loaded audit dataset.",
+			value: float64(summary.TerminalIncidents),
+		},
+		{
+			name:  "incomplete_incidents_total",
+			help:  "Incomplete incidents in the loaded audit dataset.",
+			value: float64(summary.IncompleteIncidents),
+		},
+		{
+			name:  "abandoned_incidents_total",
+			help:  "Abandoned incidents with at least one attempt and no CLOSED line.",
+			value: float64(summary.AbandonedIncidents),
+		},
+		{
 			name:  "remediation_attempts_total",
 			help:  "Remediation attempts in the loaded audit dataset.",
 			value: float64(summary.RemediationAttempts),
@@ -52,6 +67,16 @@ func NewPrometheusRegistry(
 			name:  "rollback_total",
 			help:  "Rollbacks in the loaded audit dataset.",
 			value: float64(summary.TotalRollbacks),
+		},
+		{
+			name:  "rollback_rate_attempts",
+			help:  "Rolled-back remediation attempts divided by total remediation attempts, percent.",
+			value: summary.RollbackRate,
+		},
+		{
+			name:  "rollback_rate_incidents",
+			help:  "Incidents containing a rollback divided by actionable incidents, percent.",
+			value: summary.IncidentRollbackRate,
 		},
 		{
 			name:  "recovery_success_rate",
@@ -72,6 +97,16 @@ func NewPrometheusRegistry(
 			name:  "classifier_inference_latency_seconds",
 			help:  "Average classifier inference latency in seconds.",
 			value: summary.AverageInferenceLatencySeconds,
+		},
+		{
+			name:  "average_apply_seconds",
+			help:  "Average action dispatch-to-applied duration in seconds.",
+			value: summary.AverageApplySeconds,
+		},
+		{
+			name:  "average_verify_seconds",
+			help:  "Average verification duration in seconds.",
+			value: summary.AverageVerificationSeconds,
 		},
 		{
 			name:  "cluster_convergence_seconds",
@@ -142,6 +177,32 @@ func NewPrometheusRegistry(
 	} {
 		decisionGauge.WithLabelValues(decision).Set(
 			float64(decisionCounts[decision]),
+		)
+	}
+
+	outcomeGauge := prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Namespace: metricNamespace,
+			Name:      "incident_outcomes_total",
+			Help:      "Week-3 incident terminal outcomes in the loaded audit dataset.",
+		},
+		[]string{"outcome"},
+	)
+	if err := registry.Register(outcomeGauge); err != nil {
+		return nil, fmt.Errorf(
+			"register Prometheus metric selfheal_incident_outcomes_total: %w",
+			err,
+		)
+	}
+	for _, outcome := range []string{
+		"recovered",
+		"rolled_back",
+		"exhausted",
+		"escalated",
+		"rejected",
+	} {
+		outcomeGauge.WithLabelValues(outcome).Set(
+			float64(summary.OutcomeDistribution[outcome]),
 		)
 	}
 

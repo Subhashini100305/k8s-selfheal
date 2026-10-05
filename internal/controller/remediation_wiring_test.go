@@ -95,6 +95,18 @@ func (w *stubAuditWriter) snapshot() []safety.AuditEntry {
 	return append([]safety.AuditEntry(nil), w.entries...)
 }
 
+type fixedClock struct {
+	now time.Time
+}
+
+func (c fixedClock) Now() time.Time {
+	return c.now
+}
+
+func (c fixedClock) After(delay time.Duration) <-chan time.Time {
+	return time.After(delay)
+}
+
 // automateProposal builds a Proposal that passes Subhashini's validator for
 // an automatable restart_pod recommendation targeting testPodName.
 func automateProposal() classifier.Proposal {
@@ -155,6 +167,34 @@ func TestReconcile_NilClassifier_EscalatesByDefaultAndReleasesGuard(t *testing.T
 	waitForGuardCleared(t, r)
 }
 
+func TestReconcile_NilClassifier_EmitsEscalatedAuditEntry(t *testing.T) {
+	deploy, rs, pod := ownedPod(crashingContainerStatus("main", 3))
+	audit := &stubAuditWriter{}
+	now := time.Date(2026, time.October, 4, 10, 0, 0, 0, time.UTC)
+	r := &PodReconciler{
+		Client: fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(deploy, rs, pod).Build(),
+		Audit:  audit,
+		Clock:  fixedClock{now: now},
+	}
+	ctx, _ := newTestContext()
+
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: testNamespace, Name: testPodName}}); err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+
+	assertTerminalAuditEntry(
+		t,
+		audit.snapshot(),
+		safety.AuditEntry{
+			AttemptNumber: 0,
+			State:         stateClosed,
+			Action:        "",
+			Result:        OutcomeEscalated,
+			Pod:           testNamespace + "/" + testPodName,
+		},
+	)
+}
+
 func TestReconcile_Escalates_WhenNotSafeForAutomation(t *testing.T) {
 	deploy, rs, pod := ownedPod(crashingContainerStatus("main", 3))
 	r := &PodReconciler{
@@ -172,6 +212,35 @@ func TestReconcile_Escalates_WhenNotSafeForAutomation(t *testing.T) {
 		t.Error("expected the escalation gate to fire and log it")
 	}
 	waitForGuardCleared(t, r)
+}
+
+func TestReconcile_NotSafeForAutomation_EmitsEscalatedAuditEntry(t *testing.T) {
+	deploy, rs, pod := ownedPod(crashingContainerStatus("main", 3))
+	audit := &stubAuditWriter{}
+	now := time.Date(2026, time.October, 4, 11, 0, 0, 0, time.UTC)
+	r := &PodReconciler{
+		Client:     fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(deploy, rs, pod).Build(),
+		Classifier: stubIncidentClassifier{outcome: classifier.ClassificationOutcome{Proposal: escalateProposal()}},
+		Audit:      audit,
+		Clock:      fixedClock{now: now},
+	}
+	ctx, _ := newTestContext()
+
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: testNamespace, Name: testPodName}}); err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+
+	assertTerminalAuditEntry(
+		t,
+		audit.snapshot(),
+		safety.AuditEntry{
+			AttemptNumber: 0,
+			State:         stateClosed,
+			Action:        classifier.ActionEscalateToHuman,
+			Result:        OutcomeEscalated,
+			Pod:           testNamespace + "/" + testPodName,
+		},
+	)
 }
 
 func TestReconcile_Escalates_WhenNoMatchingActionRegistered(t *testing.T) {
@@ -194,6 +263,81 @@ func TestReconcile_Escalates_WhenNoMatchingActionRegistered(t *testing.T) {
 	waitForGuardCleared(t, r)
 }
 
+func TestReconcile_NoMatchingAction_EmitsRejectedAuditEntry(t *testing.T) {
+	deploy, rs, pod := ownedPod(crashingContainerStatus("main", 3))
+	audit := &stubAuditWriter{}
+	now := time.Date(2026, time.October, 4, 12, 0, 0, 0, time.UTC)
+	r := &PodReconciler{
+		Client:     fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(deploy, rs, pod).Build(),
+		Classifier: stubIncidentClassifier{outcome: classifier.ClassificationOutcome{Proposal: automateProposal()}},
+		Actions:    map[string]safety.RemediationAction{},
+		Audit:      audit,
+		Clock:      fixedClock{now: now},
+	}
+	ctx, _ := newTestContext()
+
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: testNamespace, Name: testPodName}}); err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+
+	assertTerminalAuditEntry(
+		t,
+		audit.snapshot(),
+		safety.AuditEntry{
+			AttemptNumber: 0,
+			State:         stateClosed,
+			Action:        classifier.ActionRestartPod,
+			Result:        OutcomeRejected,
+			Pod:           testNamespace + "/" + testPodName,
+		},
+	)
+}
+
+func TestReconcile_Exhausted_EmitsSingleTerminalAuditEntry(t *testing.T) {
+	deploy, rs, pod := ownedPod(crashingContainerStatus("main", 3))
+	audit := &stubAuditWriter{}
+	now := time.Date(2026, time.October, 4, 13, 0, 0, 0, time.UTC)
+	key := incidentKey(testNamespace, testDeploymentName)
+	r := &PodReconciler{
+		Client: fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(deploy, rs, pod).Build(),
+		Audit:  audit,
+		Clock:  fixedClock{now: now},
+		incidents: map[string]*incidentRecord{
+			key: {
+				id:           "incident-exhausted",
+				attemptCount: MaxAttempts,
+			},
+		},
+	}
+	ctx, _ := newTestContext()
+
+	request := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: testNamespace, Name: testPodName}}
+	if _, err := r.Reconcile(ctx, request); err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if _, err := r.Reconcile(ctx, request); err != nil {
+		t.Fatalf("expected no error on duplicate reconcile, got %v", err)
+	}
+
+	entries := audit.snapshot()
+	if len(entries) != 1 {
+		t.Fatalf("expected one exhausted audit entry, got %d: %+v", len(entries), entries)
+	}
+
+	assertTerminalAuditEntry(
+		t,
+		entries,
+		safety.AuditEntry{
+			IncidentID:    "incident-exhausted",
+			AttemptNumber: MaxAttempts,
+			State:         stateClosed,
+			Action:        "",
+			Result:        OutcomeExhausted,
+			Pod:           testNamespace + "/" + testPodName,
+		},
+	)
+}
+
 // --- Task 4: action selection + dispatch into Remediate() ----------------
 
 func TestReconcile_DispatchesRemediation_WhenSafeForAutomation(t *testing.T) {
@@ -201,15 +345,14 @@ func TestReconcile_DispatchesRemediation_WhenSafeForAutomation(t *testing.T) {
 	action := &stubRemediationAction{name: classifier.ActionRestartPod, called: make(chan contracts.DetectionEvent, 1)}
 	audit := &stubAuditWriter{}
 	r := &PodReconciler{
-		Client:        fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(deploy, rs, pod).Build(),
-		ManagerCtx:    context.Background(),
-		Classifier:    stubIncidentClassifier{outcome: classifier.ClassificationOutcome{Proposal: automateProposal()}},
-		Actions:       map[string]safety.RemediationAction{classifier.ActionRestartPod: action},
-		Snapshots:     stubSnapshotStore{},
-		Verifier:      stubVerifier{recovered: true},
-		Audit:         audit,
-		Clock:         safety.RealClock{},
-		AuditMetadata: safety.AuditMetadata{Workload: "W2", ArmLabel: "enabled"},
+		Client:     fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(deploy, rs, pod).Build(),
+		ManagerCtx: context.Background(),
+		Classifier: stubIncidentClassifier{outcome: classifier.ClassificationOutcome{Proposal: automateProposal()}},
+		Actions:    map[string]safety.RemediationAction{classifier.ActionRestartPod: action},
+		Snapshots:  stubSnapshotStore{},
+		Verifier:   stubVerifier{recovered: true},
+		Audit:      audit,
+		Clock:      safety.RealClock{},
 	}
 	ctx, sink := newTestContext()
 
@@ -232,11 +375,6 @@ func TestReconcile_DispatchesRemediation_WhenSafeForAutomation(t *testing.T) {
 	}
 
 	waitForGuardCleared(t, r)
-	for _, entry := range audit.snapshot() {
-		if entry.Workload != "W2" || entry.ArmLabel != "enabled" {
-			t.Fatalf("audit metadata = %q/%q, want W2/enabled", entry.Workload, entry.ArmLabel)
-		}
-	}
 	if sink.has(escalatedMsg) {
 		t.Error("a safe-for-automation proposal must not be escalated")
 	}
@@ -383,3 +521,30 @@ var errExecuteFailed = &stubExecuteError{"stub action execution failed"}
 type stubExecuteError struct{ msg string }
 
 func (e *stubExecuteError) Error() string { return e.msg }
+
+func assertTerminalAuditEntry(
+	t *testing.T,
+	entries []safety.AuditEntry,
+	want safety.AuditEntry,
+) {
+	t.Helper()
+	if len(entries) != 1 {
+		t.Fatalf("expected one terminal audit entry, got %d: %+v", len(entries), entries)
+	}
+
+	got := entries[0]
+	if got.IncidentID == "" {
+		t.Fatal("terminal audit entry has empty incident ID")
+	}
+	if want.IncidentID != "" && got.IncidentID != want.IncidentID {
+		t.Fatalf("incidentID = %q, want %q", got.IncidentID, want.IncidentID)
+	}
+	if got.AttemptNumber != want.AttemptNumber ||
+		got.State != want.State ||
+		got.Action != want.Action ||
+		got.Result != want.Result ||
+		got.Pod != want.Pod {
+
+		t.Fatalf("terminal audit entry = %+v, want %+v", got, want)
+	}
+}

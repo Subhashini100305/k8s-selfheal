@@ -20,6 +20,7 @@ type AuditRecord struct {
 	FailureMode     string `json:"failure_mode"`
 	TerminalOutcome string `json:"terminal_outcome,omitempty"`
 
+	Pod       string `json:"pod,omitempty"`
 	PodName   string `json:"pod_name"`
 	Namespace string `json:"namespace"`
 	Action    string `json:"action"`
@@ -105,6 +106,7 @@ type Summary struct {
 	TotalIncidents      int `json:"total_incidents"`
 	TerminalIncidents   int `json:"terminal_incidents"`
 	IncompleteIncidents int `json:"incomplete_incidents"`
+	AbandonedIncidents  int `json:"abandoned_incidents"`
 
 	SuccessfulRecoveries int `json:"successful_recoveries"`
 	FailedRecoveries     int `json:"failed_recoveries"`
@@ -142,6 +144,8 @@ type Summary struct {
 	W1 WorkloadSummary `json:"w1"`
 	W2 WorkloadSummary `json:"w2"`
 	W3 WorkloadSummary `json:"w3"`
+
+	ExperimentRecovery ExperimentRecoverySummary `json:"experiment_recovery"`
 
 	FalseAcceptCount int     `json:"false_accept_count"`
 	FalseRejectCount int     `json:"false_reject_count"`

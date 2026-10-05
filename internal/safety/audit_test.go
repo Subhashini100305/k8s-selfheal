@@ -20,21 +20,19 @@ func TestJSONLAuditWriterAppendsOneValidObjectPerLine(t *testing.T) {
 			IncidentID:    "incident-1",
 			AttemptNumber: 1,
 			Timestamp:     time.Unix(1, 0).UTC(),
+			Pod:           "shop/checkout-1",
 			State:         StateDetected,
 			Action:        "restart_pod",
 			Result:        "entered",
-			Workload:      "W1",
-			ArmLabel:      "enabled",
 		},
 		{
 			IncidentID:    "incident-1",
 			AttemptNumber: 1,
 			Timestamp:     time.Unix(2, 0).UTC(),
+			Pod:           "shop/checkout-1",
 			State:         StateSnapshotted,
 			Action:        "restart_pod",
 			Result:        "captured",
-			Workload:      "W1",
-			ArmLabel:      "enabled",
 		},
 	}
 
@@ -57,18 +55,17 @@ func TestJSONLAuditWriterAppendsOneValidObjectPerLine(t *testing.T) {
 			"incidentID",
 			"attemptNumber",
 			"timestamp",
+			"pod",
 			"state",
 			"action",
 			"result",
-			"workload",
-			"armLabel",
 		} {
 			if _, ok := decoded[field]; !ok {
 				t.Errorf("line %d is missing field %q", index, field)
 			}
 		}
-		if len(decoded) != 8 {
-			t.Errorf("line %d has %d fields, want exactly 8", index, len(decoded))
+		if len(decoded) != 7 {
+			t.Errorf("line %d has %d fields, want exactly 7", index, len(decoded))
 		}
 	}
 }
@@ -90,11 +87,10 @@ func TestJSONLFileAuditWriterPersistsConcurrentAppendsAcrossReopen(t *testing.T)
 				IncidentID:    "incident-concurrent",
 				AttemptNumber: 1,
 				Timestamp:     time.Unix(int64(index+1), 0).UTC(),
+				Pod:           "shop/checkout-1",
 				State:         StateDetected,
 				Action:        "restart_pod",
 				Result:        fmt.Sprintf("entry-%d", index),
-				Workload:      "W1",
-				ArmLabel:      "enabled",
 			}); appendErr != nil {
 				t.Errorf("Append() error = %v", appendErr)
 			}
@@ -113,11 +109,10 @@ func TestJSONLFileAuditWriterPersistsConcurrentAppendsAcrossReopen(t *testing.T)
 		IncidentID:    "incident-concurrent",
 		AttemptNumber: 1,
 		Timestamp:     time.Unix(100, 0).UTC(),
+		Pod:           "shop/checkout-1",
 		State:         StateLogged,
 		Action:        "restart_pod",
 		Result:        "reopened",
-		Workload:      "W1",
-		ArmLabel:      "enabled",
 	}); err != nil {
 		t.Fatalf("Append() after reopen error = %v", err)
 	}

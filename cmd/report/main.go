@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
+	"path/filepath"
 
 	"github.com/aryausingh/k8s-selfheal/internal/metrics"
 )
@@ -15,6 +17,16 @@ func main() {
 		"audit-file",
 		"",
 		"path to audit records JSON array or JSONL file",
+	)
+	runDir := flag.String(
+		"run-dir",
+		"",
+		"path to one run archive directory containing meta.json and audit.jsonl",
+	)
+	runsDir := flag.String(
+		"runs-dir",
+		"",
+		"path to directory containing per-run archive directories",
 	)
 	serve := flag.Bool(
 		"serve",
@@ -29,16 +41,42 @@ func main() {
 
 	flag.Parse()
 
-	if *auditFile == "" {
-		log.Fatal("missing required -audit-file path")
+	if *auditFile == "" && *runDir == "" && *runsDir == "" {
+		log.Fatal("missing required input: use -audit-file, -run-dir, or -runs-dir")
 	}
 
-	records, err := metrics.LoadAuditRecords(*auditFile)
-	if err != nil {
-		log.Fatal(err)
+	var records []metrics.AuditRecord
+	var metas []metrics.RunMeta
+	if *runDir != "" || *runsDir != "" {
+		if *runDir != "" && *runsDir != "" {
+			log.Fatal("use only one of -run-dir or -runs-dir")
+		}
+		archives, err := loadRunArchives(*runDir, *runsDir)
+		if err != nil {
+			log.Fatal(err)
+		}
+		for _, archive := range archives {
+			metas = append(metas, archive.Meta)
+			records = append(records, archive.Records...)
+		}
+	} else {
+		var err error
+		records, err = metrics.LoadAuditRecords(*auditFile)
+		if err != nil {
+			log.Fatal(err)
+		}
 	}
 
 	summary := metrics.Calculate(records)
+	if len(metas) > 0 {
+		var err error
+		summary.ExperimentRecovery, err = metrics.CalculateExperimentRecovery(
+			metas,
+		)
+		if err != nil {
+			log.Fatal(err)
+		}
+	}
 
 	if *serve {
 		handler, err := metrics.NewPrometheusHandler(
@@ -71,4 +109,31 @@ func main() {
 	}
 
 	fmt.Println(string(output))
+}
+
+func loadRunArchives(runDir string, runsDir string) ([]metrics.RunArchive, error) {
+	if runDir != "" {
+		archive, err := metrics.LoadRunArchive(runDir)
+		if err != nil {
+			return nil, err
+		}
+		return []metrics.RunArchive{archive}, nil
+	}
+
+	entries, err := os.ReadDir(runsDir)
+	if err != nil {
+		return nil, fmt.Errorf("read runs directory %q: %w", runsDir, err)
+	}
+	var archives []metrics.RunArchive
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		archive, err := metrics.LoadRunArchive(filepath.Join(runsDir, entry.Name()))
+		if err != nil {
+			return nil, err
+		}
+		archives = append(archives, archive)
+	}
+	return archives, nil
 }

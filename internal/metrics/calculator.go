@@ -95,6 +95,9 @@ func Calculate(records []AuditRecord) Summary {
 		if validDuration(record.ClassifierStartedAt, record.ClassifierCompletedAt) {
 			totalInference += record.ClassifierCompletedAt.Sub(record.ClassifierStartedAt)
 			validInference++
+		} else if record.ClassifierDurationSeconds > 0 {
+			totalInference += time.Duration(record.ClassifierDurationSeconds * float64(time.Second))
+			validInference++
 		}
 		if validDuration(record.ActionStartedAt, record.ActionCompletedAt) {
 			totalApply += record.ActionCompletedAt.Sub(record.ActionStartedAt)
@@ -201,6 +204,9 @@ func Calculate(records []AuditRecord) Summary {
 			}
 		} else {
 			summary.IncompleteIncidents++
+			if inc.attempts > 0 {
+				summary.AbandonedIncidents++
+			}
 		}
 
 		updateWorkloadSummary(&summary, inc, terminal)

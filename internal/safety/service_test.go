@@ -67,7 +67,8 @@ func (a *checkingAction) Execute(context.Context, DetectionEvent) error {
 }
 
 type orderingVerifier struct {
-	captured bool
+	captured  bool
+	onCapture func()
 }
 
 func (v *orderingVerifier) CapturePreActionPodUIDs(
@@ -75,6 +76,9 @@ func (v *orderingVerifier) CapturePreActionPodUIDs(
 	VerificationTarget,
 ) (PodUIDSet, error) {
 	v.captured = true
+	if v.onCapture != nil {
+		v.onCapture()
+	}
 	return PodUIDSet{types.UID("original-uid"): {}}, nil
 }
 
@@ -125,7 +129,9 @@ func TestRemediateCapturesPreActionPodUIDsBeforeAction(t *testing.T) {
 func TestAuditTransitionTimestampsExposeApplyDuration(t *testing.T) {
 	clock := &fakeClock{now: time.Unix(100, 0)}
 	store := &trackingSnapshotStore{}
-	verifier := &orderingVerifier{}
+	verifier := &orderingVerifier{
+		onCapture: func() { clock.Advance(2 * time.Second) },
+	}
 	action := &checkingAction{
 		store:     store,
 		name:      "restart_pod",
@@ -137,7 +143,6 @@ func TestAuditTransitionTimestampsExposeApplyDuration(t *testing.T) {
 		Action:    action,
 		Audit:     NewJSONLAuditWriter(&bytes.Buffer{}),
 		Clock:     clock,
-		Metadata:  AuditMetadata{Workload: "W1", ArmLabel: "enabled"},
 	}
 
 	outcome, err := service.Remediate(context.Background(), DetectionEvent{
@@ -163,8 +168,42 @@ func TestAuditTransitionTimestampsExposeApplyDuration(t *testing.T) {
 			verifyingAt = entry.Timestamp
 		}
 	}
+	if !remediatingAt.Equal(time.Unix(102, 0)) {
+		t.Fatalf("REMEDIATING timestamp = %s, want after UID capture at %s", remediatingAt, time.Unix(102, 0))
+	}
 	if got := verifyingAt.Sub(remediatingAt); got != 3*time.Second {
 		t.Fatalf("VERIFYING - REMEDIATING = %s, want 3s", got)
+	}
+}
+
+func TestDetectedAuditTimestampUsesOriginalDetectionEvent(t *testing.T) {
+	clock := &fakeClock{now: time.Unix(200, 0)}
+	detectedAt := time.Unix(123, 0)
+	store := &trackingSnapshotStore{}
+	action := &checkingAction{store: store, name: "restart_pod"}
+	service := &Service{
+		Snapshots: store,
+		Verifier:  fixedVerifier{result: VerificationResult{Recovered: true}},
+		Action:    action,
+		Audit:     NewJSONLAuditWriter(&bytes.Buffer{}),
+		Clock:     clock,
+	}
+
+	outcome, err := service.Remediate(context.Background(), DetectionEvent{
+		PodName:         "checkout-pod",
+		Namespace:       "shop",
+		ContainerName:   "app",
+		RestartCount:    1,
+		OwnerDeployment: "checkout",
+		Timestamp:       detectedAt,
+		IncidentID:      "incident-detected-timestamp",
+		AttemptNumber:   1,
+	})
+	if err != nil {
+		t.Fatalf("Remediate() error = %v", err)
+	}
+	if got := outcome.AuditEntries[0].Timestamp; !got.Equal(detectedAt) {
+		t.Fatalf("DETECTED timestamp = %s, want original event time %s", got, detectedAt)
 	}
 }
 
@@ -193,7 +232,6 @@ func TestRemediateSecond45CrashFiresRollback(t *testing.T) {
 		Action:    action,
 		Audit:     NewJSONLAuditWriter(&auditOutput),
 		Clock:     clock,
-		Metadata:  AuditMetadata{Workload: "W3", ArmLabel: "enabled"},
 	}
 	// DETECTION EVENT DATA
 	event := DetectionEvent{
@@ -239,8 +277,8 @@ func TestRemediateSecond45CrashFiresRollback(t *testing.T) {
 		if entry.IncidentID != event.IncidentID || entry.AttemptNumber != event.AttemptNumber {
 			t.Fatalf("audit identity = %q/%d, want %q/%d", entry.IncidentID, entry.AttemptNumber, event.IncidentID, event.AttemptNumber)
 		}
-		if entry.Workload != "W3" || entry.ArmLabel != "enabled" {
-			t.Fatalf("audit experiment labels = %q/%q, want W3/enabled", entry.Workload, entry.ArmLabel)
+		if entry.Pod != "shop/checkout-pod" {
+			t.Fatalf("audit pod = %q, want shop/checkout-pod", entry.Pod)
 		}
 	}
 	if !reflect.DeepEqual(gotStates, wantStates) {

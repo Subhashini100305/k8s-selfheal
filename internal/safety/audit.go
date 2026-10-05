@@ -9,24 +9,19 @@ import (
 	"time"
 )
 
-// AuditMetadata is supplied by the experiment harness. Safety copies it onto
-// every transition but never infers or fabricates either value.
-type AuditMetadata struct {
-	Workload string
-	ArmLabel string
-}
-
-// AuditEntry is the frozen shared Week 3 transition schema. Owner 3 adapts
-// these camelCase events into its separate aggregate metrics representation.
+// AuditEntry is one line of the shared Week-3 audit log.
 type AuditEntry struct {
-	IncidentID    string    `json:"incidentID"`
-	AttemptNumber int       `json:"attemptNumber"`
-	Timestamp     time.Time `json:"timestamp"`
-	State         State     `json:"state"`
-	Action        string    `json:"action"`
-	Result        string    `json:"result"`
-	Workload      string    `json:"workload"`
-	ArmLabel      string    `json:"armLabel"`
+	Timestamp time.Time `json:"timestamp"`
+	Pod       string    `json:"pod"`
+	State     State     `json:"state"`
+	Action    string    `json:"action"`
+	Result    string    `json:"result"`
+
+	IncidentID    string `json:"incidentID,omitempty"`
+	AttemptNumber int    `json:"attemptNumber,omitempty"`
+
+	// ClassifierMillis is emitted by the controller on the CLOSED line.
+	ClassifierMillis int64 `json:"classifierMillis,omitempty"`
 }
 
 // AuditWriter appends one entry for a lifecycle transition.

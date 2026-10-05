@@ -19,19 +19,21 @@ within it are numbered `attemptNumber`, starting at 1.
 
 ## 2. Terminal outcomes
 
-Exactly five. Every incident ends in exactly one of these, and nothing else is
-a terminal state.
+Exactly four controller incident outcomes are written on `CLOSED` lines. A
+fifth value, `rolled_back`, is an attempt outcome only and is never an
+incident-terminal `CLOSED` result.
 
 | Outcome | Meaning |
 |---|---|
 | `recovered` | Verification passed — the pod became Ready and stayed Ready for the full stability window. |
-| `rolled_back` | Verification failed; the pre-action snapshot was restored. |
+| `rolled_back` | Attempt outcome: verification failed; the pre-action snapshot was restored. |
 | `exhausted` | The attempt budget was spent without recovery. |
 | `escalated` | The classifier returned `safe_for_automation: false`, or sub-cause `unknown`. No action was taken. |
 | `rejected` | The validator refused the proposed action — off-allowlist, malformed, or semantically unsupported. No action was taken. |
 
 `escalated` and `rejected` are terminal at attempt 0: no snapshot is taken and
-no action runs, so they consume no attempt budget.
+no action runs, so they consume no attempt budget. `exhausted` is reported on
+attempt 3 after the third rolled-back attempt spends the budget.
 
 ## 3. Rollback trigger rate
 
@@ -53,8 +55,8 @@ taken, so there was nothing to roll back.
 ## 4. Timing
 
 ```
-TTD = fault injection timestamp  -> DetectionEvent timestamp
-TTM = DetectionEvent timestamp   -> terminal outcome timestamp
+TTD = meta.injectedAt            -> DETECTED.timestamp
+TTM = DETECTED.timestamp         -> CLOSED.timestamp
 ```
 
 TTM is reported decomposed into four stages per attempt, not as a single
@@ -111,21 +113,60 @@ goes quiet; if it is still acting at minute 10 the fix is incomplete"). It also
 keeps the rollback denominator well defined: one injection produces exactly one
 incident, not one every eight minutes.
 
-## 6. Shared audit fields
+## 6. Run archive and audit fields
 
-Every audit line carries these. Field names are frozen — the metrics module
-parses them positionally by name.
+Each experiment repetition is archived as:
+
+```
+runs/<run-id>/
+  meta.json
+  audit.jsonl    # enabled controller runs only
+```
+
+`meta.json` is the Owner-3 run metadata record. It carries workload, arm,
+injection time, setup/injection validity, disabled observation cutoff, and the
+external recovery observation when one is needed. Workload, arm, and injection
+timestamp are deliberately **not** repeated on every safety audit line.
+
+| Field | Type | Notes |
+|---|---|---|
+| `runID` / `run` | string | deterministic run identifier such as `A1-01` |
+| `workload` | string (`W1`/`W2`/`W3`) | experiment workload |
+| `arm` | string (`enabled`/`disabled`) | experiment arm |
+| `injectedAt` | RFC3339 timestamp | recorded at the actual fault-injection command boundary |
+| `observationCutoffSeconds` | int | required for disabled runs; exactly `300` |
+| `setupSucceeded` | bool | optional; `false` marks an invalid run |
+| `injectionSucceeded` | bool | optional; `false` marks an invalid run |
+| `recovered` | bool | experiment recovery observation |
+| `recoveryTimestamp` | RFC3339 timestamp | required when `recovered=true` |
+| `observedUntil` | RFC3339 timestamp | observation endpoint when no recovery is observed |
+| `recoverySource` | string | `controller`, `unaided`, `none`, or `not_recovered_within_300s` |
+
+Disabled runs have no controller audit, classifier call, or remediation
+attempt. They are represented by `meta.json` only.
+
+Every enabled-run audit line carries these fields. Field names are frozen —
+the metrics module parses them by name.
 
 | Field | Type | Written by |
 |---|---|---|
-| `incidentID` | string | operator |
-| `attemptNumber` | int | operator |
+| `incidentID` | string | controller |
+| `attemptNumber` | int | controller |
 | `timestamp` | RFC3339 | safety |
+| `pod` | `namespace/name` | safety/controller |
 | `state` | string | safety |
 | `action` | string | safety |
 | `result` | string | safety |
-| `workload` | string (`W1`/`W2`/`W3`) | run harness |
-| `armLabel` | string (`enabled`/`disabled`) | run harness |
+| `classifierMillis` | int milliseconds | controller, on `CLOSED` lines |
+
+The controller emits one authoritative incident-terminal line:
+
+```json
+{"state":"CLOSED","result":"recovered|exhausted|escalated|rejected"}
+```
+
+`ROLLED_BACK` remains an attempt-level lifecycle event. `LOGGED` is a safety
+lifecycle note and is not used as the incident terminal outcome.
 
 ## 6a. Abandoned incidents
 
@@ -173,6 +214,12 @@ attributable_recovery(workload) = recovery_rate(enabled) - recovery_rate(disable
 
 C2 is N=3 rather than 5 because it is a sanity check on a baseline expected to
 be exactly zero, not a measurement.
+
+Disabled-arm recovery is observed externally for 300 seconds from
+`injectedAt`. A run counts recovered only when a pod is Ready continuously for
+60 seconds and the full 60-second stability window completes before the
+300-second cutoff. Otherwise record `recoverySource:
+not_recovered_within_300s`; do not write "never recovered".
 
 ## Out of scope, stated
 

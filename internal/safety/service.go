@@ -3,6 +3,7 @@ package safety
 import (
 	"context"
 	"fmt"
+	"path"
 	"time"
 
 	"k8s.io/apimachinery/pkg/types"
@@ -27,7 +28,6 @@ type Service struct {
 	Action    RemediationAction
 	Audit     AuditWriter
 	Clock     Clock
-	Metadata  AuditMetadata
 }
 
 // Remediate snapshots, invokes the injected action, verifies for the stability
@@ -42,22 +42,24 @@ func (s *Service) Remediate(ctx context.Context, event DetectionEvent) (Outcome,
 
 	machine := NewStateMachine()
 	entries := make([]AuditEntry, 0, 8)
-	record := func(state State, result string) (AuditEntry, error) {
+	recordAt := func(state State, result string, timestamp time.Time) (AuditEntry, error) {
 		entry := AuditEntry{
 			IncidentID:    event.IncidentID,
 			AttemptNumber: event.AttemptNumber,
-			Timestamp:     s.Clock.Now(),
+			Timestamp:     timestamp,
+			Pod:           path.Join(event.Namespace, event.PodName),
 			State:         state,
 			Action:        s.Action.Name(),
 			Result:        result,
-			Workload:      s.Metadata.Workload,
-			ArmLabel:      s.Metadata.ArmLabel,
 		}
 		if err := s.Audit.Append(entry); err != nil {
 			return AuditEntry{}, err
 		}
 		entries = append(entries, entry)
 		return entry, nil
+	}
+	record := func(state State, result string) (AuditEntry, error) {
+		return recordAt(state, result, s.Clock.Now())
 	}
 	transition := func(next State, result string) (AuditEntry, error) {
 		if err := machine.Transition(next); err != nil {
@@ -66,7 +68,7 @@ func (s *Service) Remediate(ctx context.Context, event DetectionEvent) (Outcome,
 		return record(next, result)
 	}
 
-	if _, err := record(StateDetected, "received"); err != nil {
+	if _, err := recordAt(StateDetected, "received", event.Timestamp); err != nil {
 		return Outcome{}, err
 	}
 
@@ -82,10 +84,6 @@ func (s *Service) Remediate(ctx context.Context, event DetectionEvent) (Outcome,
 		return Outcome{}, err
 	}
 
-	_, err = transition(StateRemediating, "started")
-	if err != nil {
-		return Outcome{}, err
-	}
 	verificationTarget := VerificationTarget{
 		OriginalPod: types.NamespacedName{
 			Name:      event.PodName,
@@ -100,6 +98,9 @@ func (s *Service) Remediate(ctx context.Context, event DetectionEvent) (Outcome,
 		return Outcome{}, fmt.Errorf("capture pre-action pod UIDs: %w", err)
 	}
 	verificationTarget.PreActionPodUIDs = preActionPodUIDs
+	if _, err := transition(StateRemediating, "started"); err != nil {
+		return Outcome{}, err
+	}
 	if err := s.Action.Execute(ctx, event); err != nil {
 		return Outcome{}, fmt.Errorf("execute injected remediation action: %w", err)
 	}

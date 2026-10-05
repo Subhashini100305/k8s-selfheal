@@ -8,6 +8,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	"k8s.io/apimachinery/pkg/util/uuid"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/aryausingh/k8s-selfheal/internal/safety"
 )
@@ -52,6 +53,23 @@ type incidentRecord struct {
 	logs             string
 	events           []string
 	evidenceCaptured bool
+
+	// classifierMillis is how long the classifier call took. One value per
+	// incident, not per attempt: evidence is frozen at detection so every
+	// attempt classifies the same input.
+	classifierMillis int64
+}
+
+// stateClosed marks the single audit line that ends an incident. It is
+// deliberately not one of Owner 2's lifecycle states — her state machine
+// governs one attempt, and this line records how the incident finished.
+const stateClosed = safety.State("CLOSED")
+
+type incidentClosure struct {
+	id               string
+	outcome          string
+	attempts         int
+	classifierMillis int64
 }
 
 // admission is what beginAttempt tells Reconcile to do.
@@ -274,4 +292,55 @@ func (r *PodReconciler) freezeEvidence(key, logs string, events []string) {
 	record.logs = logs
 	record.events = slices.Clone(events)
 	record.evidenceCaptured = true
+}
+
+func (r *PodReconciler) setClassifierDuration(key string, took time.Duration) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	record := r.incidents[key]
+	if record == nil {
+		return
+	}
+	record.classifierMillis = took.Milliseconds()
+}
+
+func (r *PodReconciler) closedIncident(key string) (incidentClosure, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	record := r.incidents[key]
+	if record == nil || record.terminalOutcome == "" {
+		return incidentClosure{}, false
+	}
+	return incidentClosure{
+		id:               record.id,
+		outcome:          record.terminalOutcome,
+		attempts:         record.attemptCount,
+		classifierMillis: record.classifierMillis,
+	}, true
+}
+
+func (r *PodReconciler) auditIncidentClosed(ctx context.Context, podRef, action string, closure incidentClosure) {
+	if r.Audit == nil {
+		return
+	}
+	entry := safety.AuditEntry{
+		Timestamp:        time.Now(),
+		Pod:              podRef,
+		State:            stateClosed,
+		Action:           action,
+		Result:           closure.outcome,
+		IncidentID:       closure.id,
+		AttemptNumber:    closure.attempts,
+		ClassifierMillis: closure.classifierMillis,
+	}
+	if err := r.Audit.Append(entry); err != nil {
+		log.FromContext(ctx).Error(err, "could not write the incident CLOSED audit line",
+			"incidentID", closure.id, "outcome", closure.outcome)
+	}
+}
+
+func (r *PodReconciler) closeIncidentIfTerminal(ctx context.Context, key, podRef, action string) {
+	if closure, closed := r.closedIncident(key); closed {
+		r.auditIncidentClosed(ctx, podRef, action, closure)
+	}
 }
